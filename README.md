@@ -2,6 +2,14 @@
 
 OpenCodeEdit is a fully open-source data synthesis pipeline for instruction tuning LLMs on code editing.
 
+## Quick Guide
+
+- The code of the OpenCodeEdit pipeline is in the `generation/` folder. To run the pipeline, please follow the guideline in [generation/README.md](./generation/README.md).
+
+- The OpenCodeEdit series models can be downloaded from [here](https://huggingface.co/collections/zkzhang88/opencodeedit-series-models-68e4c5a5d6b616f7f229f96b).
+
+- The OCEData and OCEDataFT can be downloaded from [here](https://huggingface.co/datasets/zkzhang88/OCEData).
+
 ## Data Synthesis Pipline
 
 The OpenCodeEdit pipeline consists of four stages: 
