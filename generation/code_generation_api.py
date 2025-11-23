@@ -150,7 +150,7 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
                                 temperature=temperature,
                                 top_p=top_p,
                                 max_tokens=max_tokens,
-                                extra_body={"enable_thinking": False}  # Disable thinking mode
+                                extra_body=extra_body
                             )
                             if completion != "":
                                 api_busy = False
