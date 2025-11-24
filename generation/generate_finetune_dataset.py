@@ -1,48 +1,61 @@
 import json
 import random
 import os
-from typing import Optional
+from typing import Optional, List, Union
 
 SYSTEM_PROMPT = "You are a code editor. You will be provided the original code snippet and an instruction that specifies " \
 "the changes you need to make. You will produce the changed code, based on the original code and the instruction given. " \
 "Only produce the code, do not include any additional prose."
 
 
-def generate_prompt(input_files, output_file, prompt_format='share_gpt', random_seed=None):
+def generate_prompt(input_files: Union[str, List[str]], output_file: str, prompt_format: str = 'share_gpt', random_seed: Optional[int] = None):
     """
-    Generates prompts for finetuning datasets from input files and writes them to an output file in JSONL format.
+    Generates prompts for finetuning datasets from one or multiple input files and writes them to an output file in JSONL format.
     Args:
-        input_files (str): Path to the input file containing data to be processed.
+        input_files (str | list[str]): Path(s) to input JSONL file(s) containing data to be processed. Can be a single path or a list of paths.
         output_file (str): Path to the output file where the constructed prompts will be saved.
         prompt_format (str, optional): Format of the prompt to be constructed. Defaults to 'share_gpt'.
-        random_seed (int, optional): Random seed for reproducibility. If provided, sets the seed for random operations.
+        random_seed (int, optional): Random seed for reproducibility. If provided, sets the seed for random operations (e.g., mixing order).
 
     Returns:
         None
 
     """
-    
-
     if random_seed is not None:
         random.seed(random_seed)  # Set the random seed for reproducibility
 
     output_dir = os.path.dirname(os.path.abspath(output_file))
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        
-    with open(input_files, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-        # Construct prompts from the sampled lines
-        constructed_data = construct_prompt(lines, 
-                                            prompt_format=prompt_format, 
-                                            code_before_field="code_before_purify",
-                                            instruct_field="instruct_purify",
-                                            code_after_field="code_after_purify"
-                                            )
+
+    # Normalize to list of files
+    if isinstance(input_files, str):
+        files = [input_files]
+    elif isinstance(input_files, list):
+        files = input_files
+    else:
+        files = list(input_files)
+
+    constructed_data_all = []
+    for in_file in files:
+        with open(in_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            # Construct prompts from the lines of this file
+            constructed_data = construct_prompt(
+                lines,
+                prompt_format=prompt_format,
+                code_before_field="code_before_purify",
+                instruct_field="instruct_purify",
+                code_after_field="code_after_purify",
+            )
+            constructed_data_all.extend(constructed_data)
+
+    # Mix the constructed data from all files together
+    random.shuffle(constructed_data_all)
 
     # Write the constructed data to the output file in JSONL format
     with open(output_file, 'w', encoding='utf-8') as f:
-        for item in constructed_data:
+        for item in constructed_data_all:
             f.write(json.dumps(item) + '\n')
 
 
@@ -179,7 +192,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate prompts from input JSONL file.")
-    parser.add_argument("input_file", type=str, help="Path to the input JSONL file.")
+    parser.add_argument("input_file", nargs='+', help="Path(s) to the input JSONL file(s).")
     parser.add_argument("output_file", type=str, help="Path to the output JSONL file.")
     parser.add_argument("--prompt_format", type=str, choices=['alpaca', 'share_gpt'], default='share_gpt', help="Format of the prompt.")
     args = parser.parse_args()
