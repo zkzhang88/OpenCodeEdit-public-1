@@ -192,8 +192,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate prompts from input JSONL file.")
-    parser.add_argument("input_file", nargs='+', help="Path(s) to the input JSONL file(s).")
-    parser.add_argument("output_file", type=str, help="Path to the output JSONL file.")
+    parser.add_argument("--input_file", nargs='+', help="Path(s) to the input JSONL file(s).")
+    parser.add_argument("--output_file", type=str, help="Path to the output JSONL file.")
     parser.add_argument("--prompt_format", type=str, choices=['alpaca', 'share_gpt'], default='share_gpt', help="Format of the prompt.")
     args = parser.parse_args()
 
