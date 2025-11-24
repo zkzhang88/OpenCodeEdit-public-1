@@ -359,6 +359,10 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
             suffix = f"topic_{max_samples_per_topic}"
         output_path = os.path.join(output_dir, f"{base_name}_topic_sampled_{suffix}.jsonl")
     
+    # Ensure directory for output_path exists
+    out_dir = os.path.dirname(output_path) or '.'
+    os.makedirs(out_dir, exist_ok=True)
+    
     with open(output_path, 'w', encoding='utf-8') as f:
         for item in filtered_data:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
