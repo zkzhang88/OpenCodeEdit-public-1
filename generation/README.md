@@ -112,7 +112,7 @@ In HDP modeling process, the analysis results are saved in `*.joblib` files in `
 ## Finetune dataset construction
 After data mixing and filtering, you can run `generate_finetune_dataset.py` to construct a formatted dataset for downstream finetuning:
 ```bash
-python generate_finetune_dataset.py ./data/filtered/ocedata_mix_descriptive_dt_filtered.jsonl ./data/finetune/ocedata_mix_descriptive_ft.jsonl
+python generate_finetune_dataset.py --input_file ./data/filtered/ocedata_mix_descriptive_dt_filtered.jsonl ./data/filtered/ocedata_mix_lazy_dt_filtered.jsonl --output_file ./data/finetune/ocedata_mix_ft.jsonl
 ```
 
 Both Alpaca and ShareGPT formats are supported, for a convenient finetuning through [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory). For more information about the data formats please refer to [LLaMA-Factory documentation](https://llamafactory.readthedocs.io/zh-cn/latest/getting_started/data_preparation.html).
