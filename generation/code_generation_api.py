@@ -4,12 +4,28 @@ import random
 import datetime
 import argparse
 import time
+import yaml
 
 
 MAX_RETRIES = 5  # Maximum number of retries
+API_KEY_CONFIG_PATH = "api_keys.yaml"  # Path to the YAML config file
 
-QWEN_API_KEY = "sk-xxxx"  # Replace with your API Key from https://bailian.console.aliyun.com/?spm=a2c4g.11186623.0.0.48eb2bdbvjKMhD&tab=model#/api-key
-DEEPSEEK_API_KEY = "sk-xxxx"  # Replace with your API Key from https://platform.deepseek.com/
+def load_api_keys(api_config_path: str | None = None):
+    """Load API keys from YAML config file."""
+
+    with open(api_config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+
+    qwen_api_key = config.get("QWEN_API_KEY")
+    deepseek_api_key = config.get("DEEPSEEK_API_KEY")
+
+    if not qwen_api_key or not deepseek_api_key:
+        raise ValueError("QWEN_API_KEY or DEEPSEEK_API_KEY not found in YAML config file.")
+
+    return qwen_api_key, deepseek_api_key
+
+
+QWEN_API_KEY, DEEPSEEK_API_KEY = load_api_keys(API_KEY_CONFIG_PATH)
 
  # Process each record and call the API
 def api_infer(input_path, output_path, recovery_file, model_name, num_completion=1, max_samples=None, output_fields=None,
