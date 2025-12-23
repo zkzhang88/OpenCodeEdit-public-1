@@ -5,10 +5,11 @@ import datetime
 import argparse
 import time
 import yaml
+from pathlib import Path
 
 
 MAX_RETRIES = 5  # Maximum number of retries
-API_KEY_CONFIG_PATH = "api_keys.yaml"  # Path to the YAML config file
+API_KEY_CONFIG_PATH = str(Path(__file__).resolve().parent / "api_keys.yaml")
 
 def load_api_keys(api_config_path: str | None = None):
     """Load API keys from YAML config file."""
