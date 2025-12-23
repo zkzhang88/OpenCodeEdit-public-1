@@ -62,6 +62,61 @@ def filter_by_modify_lines(data_list, max_modify_lines=70, max_hunk_num=7):
     return filtered
 
 
+def filter_diff_by_percentile(data_list, rm_percentile=0.5, keep_percentile=None):
+    """
+    Filters out data at the tail end by percentile based on number of modified lines.
+    For example, if rm_percentile=0.5, sorts data by modified lines and removes the bottom 0.5% of samples.
+    
+    Args:
+        data_list (list): List of dictionaries, each containing 'code_before_purify' and 'code_after_purify'.
+        rm_percentile (float, optional): Percentage of data to filter out from the tail (0.0-100.0). 
+                                        Data is sorted by modified lines (ascending), and the bottom percentile% is removed.
+                                        Defaults to 0.5 (removes bottom 0.5% of samples).
+        keep_percentile (float, optional): Percentage of data to keep from the head (0.0-100.0).
+                                        Data is sorted by modified lines (ascending), and only the top keep_percentile% is kept.
+                                        If set, rm_percentile is ignored. Defaults to None.
+    
+    Returns:
+        list: Filtered list with tail percentile% of samples removed (based on modified lines ranking).
+    """
+    
+    if not data_list:
+        return []
+    
+    # Calculate modified lines for each item
+    modify_lines_list = []
+    for item in data_list:
+        old_code = item.get('code_before_purify', '')
+        new_code = item.get('code_after_purify', '')
+        diff_stats = diff_analysis(old_code, new_code)
+        modify_lines = diff_stats["modified"] + diff_stats["added"] + diff_stats["removed"]
+        modify_lines_list.append(modify_lines)
+    
+    # Create (item, modify_lines) pairs and sort by modified lines (ascending)
+    data_with_lines = list(zip(data_list, modify_lines_list))
+    data_with_lines.sort(key=lambda x: x[1])
+    
+    # Calculate how many samples to keep (remove bottom percentile%)
+    total_count = len(data_list)
+    if keep_percentile is not None:
+        keep_count = int(total_count * (keep_percentile / 100))
+    else:
+        keep_count = int(total_count * (1 - rm_percentile / 100))
+    
+    # Keep the first keep_count samples (those with fewer modified lines)
+    filtered_data = [item for item, _ in data_with_lines[:keep_count]]
+    
+    if keep_count > 0:
+        threshold = data_with_lines[keep_count - 1][1]
+    else:
+        threshold = 0
+    
+    logging.info(f"Filtered by percentile {rm_percentile}%: {len(data_list)} → {len(filtered_data)} items")
+    logging.info(f"Modified lines threshold (last kept sample): {threshold}")
+    
+    return filtered_data
+
+
 def hdp_topic_analysis(jsonl_path, field_name, data_format, refit=False, debug=False, random_seed=None, **kwargs):
     """
     Performs Hierarchical Dirichlet Process (HDP) topic modeling analysis on a dataset of instructions.

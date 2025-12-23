@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from utils.statistic_funcs import filter_by_modify_lines
+from utils.statistic_funcs import filter_by_modify_lines, filter_diff_by_percentile
 from utils.statistic_funcs import filter_data_by_hdp_topic_analysis
 
 log = logging.getLogger(__name__)
@@ -44,7 +44,8 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
 
     ### Diff Filtering
     data_list = read_jsonl(jsonl_path)
-    filtered_data = filter_by_modify_lines(data_list, max_modify_lines=max_modify_lines, max_hunk_num=max_hunk_num)
+    # filtered_data = filter_by_modify_lines(data_list, max_modify_lines=max_modify_lines, max_hunk_num=max_hunk_num)
+    filtered_data = filter_diff_by_percentile(data_list, rm_percentile=1.0)
     output_filename = f"{base_name}_diff_filtered.jsonl"
     instruct_gen_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(instruct_gen_dir, "data", "filtered")
