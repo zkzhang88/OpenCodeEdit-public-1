@@ -178,3 +178,6 @@ cython_debug/
 
 # Local generated data files
 generation/generated_data/
+
+# Config files for local experiments
+add_exp_configs/
