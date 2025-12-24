@@ -38,6 +38,7 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
 
     max_modify_lines = filter_settings.get("max_modify_lines", 70) if filter_settings else 70
     max_hunk_num = filter_settings.get("max_hunk_num", 7) if filter_settings else 7
+    rm_percentile = filter_settings.get("rm_percentile", 1.0) if filter_settings else 1.0
     max_samples_total = filter_settings.get("max_samples_total", 10000) if filter_settings else 10000
     refit = filter_settings.get("refit", False) if filter_settings else False
 
@@ -45,7 +46,7 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
     ### Diff Filtering
     data_list = read_jsonl(jsonl_path)
     # filtered_data = filter_by_modify_lines(data_list, max_modify_lines=max_modify_lines, max_hunk_num=max_hunk_num)
-    filtered_data = filter_diff_by_percentile(data_list, rm_percentile=1.0)
+    filtered_data = filter_diff_by_percentile(data_list, rm_percentile=rm_percentile)
     output_filename = f"{base_name}_diff_filtered.jsonl"
     instruct_gen_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(instruct_gen_dir, "data", "filtered")
