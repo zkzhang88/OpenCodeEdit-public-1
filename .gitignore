@@ -181,3 +181,6 @@ generation/generated_data/
 
 # Config files for local experiments
 add_exp_configs/
+
+# HDP fit model files
+generation/utils/fit_results/
