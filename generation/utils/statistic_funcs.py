@@ -341,6 +341,8 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
     log.info(f"Found {len(topic_counts)} topics")
     
     # Create mapping from topic to document indices
+    # 这段代码将每条文档的主导主题编号 dominant_topics 映射到其所在索引，生成字典 topic_to_indices，
+    # 其中键为 topic_id，值为包含该主题下所有样本索引的列表，用于后续按主题统计或采样。
     topic_to_indices = {}
     for idx, topic_id in enumerate(dominant_topics):
         topic_to_indices.setdefault(topic_id, []).append(idx)
@@ -374,7 +376,7 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
                 break
 
         quota = (max_samples_total - sum(len(v) for v in locked.values())) / len(unlocked)
-        topic_target_counts = {}
+        topic_target_counts = {}  # 是一个字典，键为 topic_id，值为该主题最终要保留的样本数（整数）
         for topic, indices in locked.items():
             topic_target_counts[topic] = len(indices)
         for topic in unlocked:
