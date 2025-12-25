@@ -82,3 +82,25 @@ def edit_instruction_splitter(instr: str, tokenize: bool = True) -> tuple:
 
     return code_tokens, instr_tokens
 
+
+def tokenize_instruction(input_instr: str, input_type: str):
+
+    if input_type == 'code':
+        # Remove markdown code block wrappers
+        if input_instr.startswith("```") and input_instr.endswith("```"):
+            input_instr = re.sub(r"^```[a-zA-Z]*\n?", "", input_instr)
+            input_instr = re.sub(r"\n?```$", "", input_instr)
+    
+        # Tokenize code
+        code_tokens = process_code_tokens(input_instr)
+        return code_tokens
+
+    elif input_type == 'text':
+        # Tokenize instruction, remove punctuation, and convert to lowercase
+        instr_word_list = re.split(r'\s+', input_instr)
+        instr_tokens = [re.sub(r'[^\w]', '', w).lower() for w in instr_word_list]
+        instr_tokens = [w for w in instr_tokens if w]
+        return instr_tokens
+    
+    else:
+        raise ValueError(f"Unsupported input_type: {input_type}")
