@@ -16,7 +16,7 @@ from collections import Counter
 import plotly.express as px
 
 from utils.load_instruct_from_file import load_instructions_from_jsonl
-from utils.code_splitter import edit_instruction_splitter
+from utils.code_splitter import tokenize_instruction
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
@@ -282,23 +282,33 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
     hdp_dict_path = os.path.join(fit_dir, f"{base_name}_hdp_dictionary.joblib")
     processed_docs_path = os.path.join(fit_dir, f"{base_name}_hdp_processed_docs.joblib")
     
-    # Load original data
-    instr_list, _ = load_instructions_from_jsonl(jsonl_path, field_name, data_format)
+    # # Load original data
+    # instr_list, _ = load_instructions_from_jsonl(jsonl_path, field_name, data_format)
     
     # Also read full JSONL data for later filtering
     original_data = []
+    code_instr_list = []
     with open(jsonl_path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if line:
-                original_data.append(json.loads(line))
-    
+                line_code = json.loads(line).get('code_before_purify', '')
+                line_instr = json.loads(line).get('instruct_purify', '')
+                if line_code and line_instr:
+                    original_data.append(json.loads(line))
+                    code_instr_list.append((
+                        line_code,
+                        line_instr
+                    ))
+        
     log.info(f"Total original data count: {len(original_data)}")
     
     # Text preprocessing function
-    def preprocess(text):
+    def preprocess(instr_tuple):
         stop_words = set(stopwords.words('english'))
-        code_tokens, word_tokens = edit_instruction_splitter(text)
+        # code_tokens, word_tokens = edit_instruction_splitter(text)
+        code_tokens = tokenize_instruction(instr_tuple[0], input_type='code')
+        word_tokens = tokenize_instruction(instr_tuple[1], input_type='text')
         word_tokens = [t for t in word_tokens if t.isalpha()]
         word_tokens = [t for t in word_tokens if t not in stop_words]
         code_tokens = [t for t in code_tokens if t.isidentifier()]
@@ -315,7 +325,7 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
         corpus = [dictionary.doc2bow(doc) for doc in tqdm(processed_docs, desc="Building HDP corpus")]
     else:
         log.info("Start preprocessing documents...")
-        processed_docs = [preprocess(doc) for doc in tqdm(instr_list, desc="Preprocessing instructions for HDP")]
+        processed_docs = [preprocess(doc) for doc in tqdm(code_instr_list, desc="Preprocessing instructions for HDP")]
         dictionary = corpora.Dictionary(processed_docs)
         corpus = [dictionary.doc2bow(doc) for doc in tqdm(processed_docs, desc="Building HDP corpus")]
         log.info("Performing HDP topic analysis...")
