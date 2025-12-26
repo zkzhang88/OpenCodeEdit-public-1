@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 logging.getLogger('gensim').setLevel(logging.WARNING)
 
 
-def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_settings=None):
+def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_settings=None, output_names=None):
     """
     Filters and processes data from a JSONL file using diff-based and topic-based criteria.
     This function performs two main filtering steps:
@@ -27,6 +27,9 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
             - "max_hunk_num" (int): Maximum number of hunks allowed per sample (default: 7).
             - "max_samples_total" (int): Maximum total number of samples after filtering (default: 10000).
             - "refit" (bool): Whether to refit the HDP topic model (default: False).
+        output_names (dict, optional): Dictionary of output filenames. Supported keys:
+            - "diff_filtered" (str): Output filename for diff-filtered data (default: auto-generated).
+            - "dt_filtered" (str): Output filename for diff+topic-filtered data (default: auto-generated).
     Returns:
         None: The function writes filtered data to output files in the "filtered" directory.
     """
@@ -42,21 +45,23 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
     max_samples_total = filter_settings.get("max_samples_total", 10000) if filter_settings else 10000
     refit = filter_settings.get("refit", False) if filter_settings else False
 
+    # Get output filenames from config or use defaults
+    diff_filtered_name = output_names.get("diff_filtered", f"{base_name}_diff_filtered.jsonl") if output_names else f"{base_name}_diff_filtered.jsonl"
+    dt_filtered_name = output_names.get("dt_filtered", f"{base_name}_dt_filtered.jsonl") if output_names else f"{base_name}_dt_filtered.jsonl"
+
 
     ### Diff Filtering
     data_list = read_jsonl(jsonl_path)
     # filtered_data = filter_by_modify_lines(data_list, max_modify_lines=max_modify_lines, max_hunk_num=max_hunk_num)
     filtered_data = filter_diff_by_percentile(data_list, rm_percentile=rm_percentile)
-    output_filename = f"{base_name}_diff_filtered.jsonl"
     instruct_gen_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(instruct_gen_dir, "data", "filtered")
     os.makedirs(output_dir, exist_ok=True)
-    diff_output_path = os.path.join(output_dir, output_filename)
+    diff_output_path = os.path.join(output_dir, diff_filtered_name)
     write_jsonl(filtered_data, diff_output_path)
 
     ### HDP Topic Filtering
-    output_filename = f"{base_name}_dt_filtered.jsonl"
-    output_path = os.path.join(output_dir, output_filename)
+    output_path = os.path.join(output_dir, dt_filtered_name)
 
     filter_data_by_hdp_topic_analysis(
         jsonl_path=diff_output_path,
@@ -102,5 +107,6 @@ if __name__ == "__main__":
         field_name=config["field_name"],
         data_format=config["data_format"],
         random_seed=config.get("random_seed", None),
-        filter_settings=config.get("filter_settings", None)
+        filter_settings=config.get("filter_settings", None),
+        output_names=config.get("output_names", None)
     )

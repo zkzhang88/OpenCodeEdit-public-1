@@ -20,3 +20,8 @@ filter_settings:
   max_samples_total: 10000
   # Whether to refit the HDP topic model
   refit: false
+
+# Optional: Custom output filenames (if not specified, filenames are auto-generated)
+# output_names:
+#   diff_filtered: "my_custom_diff_filtered.jsonl"
+#   dt_filtered: "my_custom_dt_filtered.jsonl"
