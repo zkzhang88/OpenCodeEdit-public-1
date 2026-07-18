@@ -495,6 +495,38 @@ def contains_markdown_fence(source: str) -> bool:
     )
 
 
+def _layout_insensitive_tokens(source: str) -> Tuple[Tuple[int, str], ...]:
+    """Return tokens with blank lines and formatting whitespace normalized."""
+    normalized = []
+    for token_info in tokenize.generate_tokens(io.StringIO(source).readline):
+        token_type, token_text = token_info.type, token_info.string
+        if token_type in {tokenize.NL, tokenize.ENDMARKER}:
+            continue
+        if token_type in {tokenize.INDENT, tokenize.NEWLINE}:
+            # Keep block/statement boundaries while ignoring their exact
+            # whitespace representation.
+            token_text = ""
+        normalized.append((token_type, token_text))
+    return tuple(normalized)
+
+
+def code_is_equivalent(pre_code: str, post_code: str) -> bool:
+    """Compare code while ignoring blank lines and formatting whitespace."""
+    try:
+        return _layout_insensitive_tokens(pre_code) == _layout_insensitive_tokens(
+            post_code
+        )
+    except (tokenize.TokenError, IndentationError):
+        # Tokenization can fail for already malformed snippets. A conservative
+        # text fallback still ignores blank lines and surrounding whitespace.
+        def normalize_lines(source: str) -> Tuple[str, ...]:
+            return tuple(
+                line.strip() for line in source.splitlines() if line.strip()
+            )
+
+        return normalize_lines(pre_code) == normalize_lines(post_code)
+
+
 def _is_incomplete_syntax(source: str, exc: BaseException) -> bool:
     message = str(exc).lower()
     if any(fragment in message for fragment in INCOMPLETE_MESSAGES):
@@ -686,13 +718,14 @@ def inspect_pair(
             analyses[side] = analyze_tree(parsed_code.tree, parsed_code.dialect)
 
     if values["pre"] is not None and values["post"] is not None:
-        if values["pre"] == values["post"]:
+        if code_is_equivalent(values["pre"], values["post"]):
             issues.append(
                 make_issue(
                     "identical_code",
                     "pair",
                     None,
-                    "Pre-edit and post-edit code are exactly identical",
+                    "Pre-edit and post-edit code are equivalent after "
+                    "ignoring blank lines and layout whitespace",
                 )
             )
 

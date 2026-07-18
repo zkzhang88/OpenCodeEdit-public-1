@@ -127,6 +127,8 @@ The checker validates Python 3 syntax with a Python 2 fallback, incomplete code
 structures, empty output, Markdown fences, identical pre/post code, undefined
 names, missing imports, and references made unresolvable by an edit. It performs
 static analysis only: sample code and third-party imports are never executed.
+Pre/post code is considered identical when it differs only in blank lines or
+formatting whitespace; whitespace inside strings remains significant.
 Use `--input-file`, `--report-file`, `--filtered-file`, `--pre-field`, and
 `--post-field` to override the defaults. Add `--fail-on-issues` to return a
 non-zero status when rejected samples are found.

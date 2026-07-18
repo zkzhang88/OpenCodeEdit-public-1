@@ -5,6 +5,7 @@ import unittest
 
 from generation.check_ocedata_quality import (
     check_jsonl,
+    code_is_equivalent,
     contains_markdown_fence,
     inspect_pair,
     main,
@@ -105,6 +106,18 @@ class FormatAndParsingTests(unittest.TestCase):
         codes = issue_codes({PRE: "x = 1\n", POST: incomplete})
         self.assertIn("syntax_error", codes)
         self.assertIn("incomplete_structure", codes)
+
+    def test_identical_code_ignores_layout_but_not_content(self):
+        before = "if ready:\n    value = call('a  b')\n\n"
+        after = "if  ready:\n  value=call('a  b')\n"
+        self.assertTrue(code_is_equivalent(before, after))
+        self.assertIn("identical_code", issue_codes({PRE: before, POST: after}))
+
+        changed_string = "if ready:\n    value = call('a b')\n"
+        self.assertFalse(code_is_equivalent(before, changed_string))
+        self.assertNotIn(
+            "identical_code", issue_codes({PRE: before, POST: changed_string})
+        )
 
     def test_rst_underlines_are_not_markdown_fences(self):
         source = '"""\\ntitle\\n~~~~~~~~~~~~\\n"""\nvalue = 1\n'
