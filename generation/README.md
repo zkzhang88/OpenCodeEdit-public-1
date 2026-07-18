@@ -108,6 +108,29 @@ You can change the file to be filtered in the `filter_config.yaml`. The output f
 
 In HDP modeling process, the analysis results are saved in `*.joblib` files in `./utils/fit_results/` directory, for repetitive running. If you want to rebuild the analysis results, set `refit: true` in `filter_config.yaml`.
 
+## OCEData Static Quality Check
+
+Run the static quality checker from the repository root:
+
+```bash
+python3 generation/check_ocedata_quality.py
+```
+
+By default, it checks `data/OCEData/ocedata.jsonl` and writes:
+
+- `data/OCEData/ocedata_quality_issues.jsonl`, with one structured report
+  record for every rejected sample;
+- `data/OCEData/ocedata_quality_filtered.jsonl`, containing the original JSONL
+  lines that passed every check.
+
+The checker validates Python 3 syntax with a Python 2 fallback, incomplete code
+structures, empty output, Markdown fences, identical pre/post code, undefined
+names, missing imports, and references made unresolvable by an edit. It performs
+static analysis only: sample code and third-party imports are never executed.
+Use `--input-file`, `--report-file`, `--filtered-file`, `--pre-field`, and
+`--post-field` to override the defaults. Add `--fail-on-issues` to return a
+non-zero status when rejected samples are found.
+
 
 ## Finetune dataset construction
 After data mixing and filtering, you can run `generate_finetune_dataset.py` to construct a formatted dataset for downstream finetuning:
