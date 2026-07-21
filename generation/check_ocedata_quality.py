@@ -671,11 +671,11 @@ def inspect_pair(
     issues: List[Dict[str, object]] = []
     parse_counts: Counter = Counter()
     values: Dict[str, Optional[str]] = {"pre": None, "post": None}
-    parsed: Dict[str, ParsedCode] = {}
     analyses: Dict[str, StaticAnalysis] = {}
 
-    # Apply the same validation pipeline independently to pre-edit and
-    # post-edit code before comparing their static-analysis results.
+    # Parse both sides so pre-edit can serve as a silent comparison baseline,
+    # but expose only truncation findings from pre-edit. Post-edit retains the
+    # complete syntax and static-analysis policy.
     for side, field_name in (("pre", pre_field), ("post", post_field)):
         if field_name not in record:
             issues.append(
@@ -714,8 +714,14 @@ def inspect_pair(
                 )
             )
         parsed_code = parse_code(value, side, field_name)
-        parsed[side] = parsed_code
-        issues.extend(parsed_code.issues)
+        if side == "pre":
+            issues.extend(
+                issue
+                for issue in parsed_code.issues
+                if issue["code"] == "incomplete_structure"
+            )
+        else:
+            issues.extend(parsed_code.issues)
         if parsed_code.dialect:
             parse_counts[parsed_code.dialect] += 1
         else:
@@ -737,25 +743,22 @@ def inspect_pair(
 
     pre_analysis = analyses.get("pre")
     post_analysis = analyses.get("post")
-    if pre_analysis:
-        issues.extend(
-            reference_issues(pre_analysis, "pre", pre_field, post_analysis)
-        )
     if post_analysis:
         post_reference_issues = reference_issues(
             post_analysis, "post", post_field, pre_analysis
         )
         issues.extend(post_reference_issues)
-        pre_undefined = set(pre_analysis.undefined) if pre_analysis else set()
-        # Preserve the ordinary post-edit issue and add a second, explicit
-        # delta issue when that unresolved name was not already unresolved.
-        for issue in post_reference_issues:
-            name = issue.get("name")
-            if isinstance(name, str) and name not in pre_undefined:
-                new_issue = dict(issue)
-                new_issue["code"] = f"new_{issue['code']}"
-                new_issue["message"] = f"Post-edit introduced: {issue['message']}"
-                issues.append(new_issue)
+        # Only claim that post-edit introduced an issue when a valid pre-edit
+        # analysis exists. Otherwise there is no trustworthy comparison base.
+        if pre_analysis:
+            pre_undefined = set(pre_analysis.undefined)
+            for issue in post_reference_issues:
+                name = issue.get("name")
+                if isinstance(name, str) and name not in pre_undefined:
+                    new_issue = dict(issue)
+                    new_issue["code"] = f"new_{issue['code']}"
+                    new_issue["message"] = f"Post-edit introduced: {issue['message']}"
+                    issues.append(new_issue)
 
     return issues, parse_counts
 

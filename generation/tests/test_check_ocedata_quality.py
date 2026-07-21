@@ -60,12 +60,24 @@ def outer(arg):
         before = "result = parse_article(url)\n"
         after = "def parse_article(url):\n    return url\nresult = parse_article(url)\n"
         issues, _ = inspect_pair({PRE: before, POST: after}, PRE, POST)
-        pre_issue_codes = [
-            issue["code"]
+        pre_name_issues = [
+            issue
             for issue in issues
             if issue["side"] == "pre" and issue.get("name") == "parse_article"
         ]
-        self.assertEqual(pre_issue_codes, ["undefined_name"])
+        self.assertEqual(pre_name_issues, [])
+
+    def test_pre_static_and_non_truncation_syntax_issues_are_silent(self):
+        cases = [
+            "result = missing_name()\n",
+            "result = os.path.join('a', 'b')\n",
+            "def broken():\n    nonlocal missing\n    return missing\n",
+            "break\n",
+        ]
+        for before in cases:
+            with self.subTest(before=before):
+                issues, _ = inspect_pair({PRE: before, POST: "value = 1\n"}, PRE, POST)
+                self.assertEqual(issues, [])
 
     def test_removed_import_and_stdlib_module_are_missing_imports(self):
         before = "import json\nresult = json.dumps({})\n"
@@ -117,6 +129,27 @@ class FormatAndParsingTests(unittest.TestCase):
         codes = issue_codes({PRE: "x = 1\n", POST: incomplete})
         self.assertIn("syntax_error", codes)
         self.assertIn("incomplete_structure", codes)
+
+    def test_pre_reports_only_empty_fence_and_incomplete_structure(self):
+        empty_codes = issue_codes({PRE: "", POST: "value = 1\n"})
+        self.assertEqual(empty_codes, ["empty_code"])
+
+        fenced = "```python\nvalue = 1\n```\n"
+        fenced_codes = issue_codes({PRE: fenced, POST: "value = 1\n"})
+        self.assertIn("markdown_fence", fenced_codes)
+        self.assertNotIn("syntax_error", fenced_codes)
+
+        incomplete_codes = issue_codes({PRE: "def broken():\n", POST: "value = 1\n"})
+        self.assertIn("incomplete_structure", incomplete_codes)
+        self.assertNotIn("syntax_error", incomplete_codes)
+
+    def test_unparseable_pre_does_not_make_post_issue_new(self):
+        issues, _ = inspect_pair(
+            {PRE: "def broken():\n", POST: "result = missing_name()\n"}, PRE, POST
+        )
+        codes = [issue["code"] for issue in issues]
+        self.assertIn("undefined_name", codes)
+        self.assertNotIn("new_undefined_name", codes)
 
     def test_identical_code_ignores_layout_but_not_content(self):
         before = "if ready:\n    value = call('a  b')\n\n"
