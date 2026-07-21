@@ -56,6 +56,17 @@ def outer(arg):
         self.assertIn("unresolvable_reference", codes)
         self.assertIn("new_unresolvable_reference", codes)
 
+    def test_definition_added_by_post_does_not_reverse_pre_issue_direction(self):
+        before = "result = parse_article(url)\n"
+        after = "def parse_article(url):\n    return url\nresult = parse_article(url)\n"
+        issues, _ = inspect_pair({PRE: before, POST: after}, PRE, POST)
+        pre_issue_codes = [
+            issue["code"]
+            for issue in issues
+            if issue["side"] == "pre" and issue.get("name") == "parse_article"
+        ]
+        self.assertEqual(pre_issue_codes, ["undefined_name"])
+
     def test_removed_import_and_stdlib_module_are_missing_imports(self):
         before = "import json\nresult = json.dumps({})\n"
         after = "result = json.dumps({})\nother = os.path.join('a', 'b')\n"

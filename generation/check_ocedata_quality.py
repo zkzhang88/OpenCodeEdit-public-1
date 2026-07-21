@@ -611,6 +611,7 @@ def _undefined_issue_code(
     use: NameUse,
     current: StaticAnalysis,
     other: Optional[StaticAnalysis],
+    side: str,
 ) -> str:
     # Cross-checking the other edit side makes removed imports/definitions much
     # more reliable than guessing solely from an isolated code fragment.
@@ -623,7 +624,10 @@ def _undefined_issue_code(
         )
     ):
         return "missing_import"
-    if other is not None and name in other.all_bindings:
+    # A binding can only become unresolvable in the forward edit direction.
+    # When checking pre-edit, a definition added by post-edit does not mean the
+    # name was "previously bound"; it is simply undefined in the pre-edit code.
+    if side == "post" and other is not None and name in other.all_bindings:
         return "unresolvable_reference"
     return "undefined_name"
 
@@ -638,7 +642,7 @@ def reference_issues(
     for name, use in sorted(
         analysis.undefined.items(), key=lambda item: (item[1].lineno, item[0])
     ):
-        code = _undefined_issue_code(name, use, analysis, other)
+        code = _undefined_issue_code(name, use, analysis, other, side)
         if code == "missing_import":
             message = f"Name '{name}' is used like a module but is not imported"
         elif code == "unresolvable_reference":
