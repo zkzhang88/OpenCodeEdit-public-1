@@ -670,10 +670,13 @@ def inspect_pair(
     parse_counts: Counter = Counter()
     values: Dict[str, Optional[str]] = {"pre": None, "post": None}
     analyses: Dict[str, StaticAnalysis] = {}
+    parsed_codes: Dict[str, ParsedCode] = {}
+    pre_incomplete_issues: List[Dict[str, object]] = []
+    post_parse_issues: List[Dict[str, object]] = []
 
     # Parse both sides so pre-edit can serve as a silent comparison baseline,
-    # but expose only truncation findings from pre-edit. Post-edit retains the
-    # complete syntax and static-analysis policy.
+    # but defer pre-edit truncation findings until post-edit has been parsed.
+    # A valid post-edit proves that the edit repaired the incomplete input.
     for side, field_name in (("pre", pre_field), ("post", post_field)):
         if field_name not in record:
             issues.append(
@@ -712,20 +715,26 @@ def inspect_pair(
                 )
             )
         parsed_code = parse_code(value, side, field_name)
+        parsed_codes[side] = parsed_code
         if side == "pre":
-            issues.extend(
+            pre_incomplete_issues.extend(
                 issue
                 for issue in parsed_code.issues
                 if issue["code"] == "incomplete_structure"
             )
         else:
-            issues.extend(parsed_code.issues)
+            post_parse_issues.extend(parsed_code.issues)
         if parsed_code.dialect:
             parse_counts[parsed_code.dialect] += 1
         else:
             parse_counts["unparseable"] += 1
         if parsed_code.tree is not None and parsed_code.dialect is not None:
             analyses[side] = analyze_tree(parsed_code.tree, parsed_code.dialect)
+
+    post_parsed = parsed_codes.get("post")
+    if post_parsed is None or post_parsed.dialect is None:
+        issues.extend(pre_incomplete_issues)
+    issues.extend(post_parse_issues)
 
     if values["pre"] is not None and values["post"] is not None:
         if code_is_equivalent(values["pre"], values["post"]):

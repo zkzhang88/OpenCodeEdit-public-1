@@ -130,7 +130,7 @@ class FormatAndParsingTests(unittest.TestCase):
         self.assertIn("syntax_error", codes)
         self.assertIn("incomplete_structure", codes)
 
-    def test_pre_reports_only_empty_fence_and_incomplete_structure(self):
+    def test_pre_reports_empty_and_fence_but_allows_repaired_incomplete_code(self):
         empty_codes = issue_codes({PRE: "", POST: "value = 1\n"})
         self.assertEqual(empty_codes, ["empty_code"])
 
@@ -139,16 +139,46 @@ class FormatAndParsingTests(unittest.TestCase):
         self.assertIn("markdown_fence", fenced_codes)
         self.assertNotIn("syntax_error", fenced_codes)
 
-        incomplete_codes = issue_codes({PRE: "def broken():\n", POST: "value = 1\n"})
-        self.assertIn("incomplete_structure", incomplete_codes)
-        self.assertNotIn("syntax_error", incomplete_codes)
+        repaired_cases = [
+            (
+                "def receiver(func):\n    return func\n\n@receiver\n",
+                "def receiver(func):\n    return func\n\n@receiver\n"
+                "def handler():\n    pass\n",
+            ),
+            (
+                "settings = object()\nsetattr(settings, 'enabled',\n",
+                "settings = object()\nsetattr(settings, 'enabled', True)\n",
+            ),
+            (
+                "def setup(**kwargs):\n    pass\nsetup(name='example',\n",
+                "def setup(**kwargs):\n    pass\nsetup(name='example')\n",
+            ),
+        ]
+        for before, after in repaired_cases:
+            with self.subTest(before=before):
+                incomplete_codes = issue_codes({PRE: before, POST: after})
+                self.assertNotIn("incomplete_structure", incomplete_codes)
+                self.assertNotIn("syntax_error", incomplete_codes)
+
+    def test_pre_incomplete_structure_remains_when_post_is_unparseable(self):
+        issues, _ = inspect_pair(
+            {PRE: "def broken():\n", POST: "if ready:\n"}, PRE, POST
+        )
+        pre_codes = [
+            issue["code"] for issue in issues if issue["side"] == "pre"
+        ]
+        self.assertIn("incomplete_structure", pre_codes)
 
     def test_unparseable_pre_does_not_make_post_issue_new(self):
         issues, _ = inspect_pair(
             {PRE: "def broken():\n", POST: "result = missing_name()\n"}, PRE, POST
         )
         codes = [issue["code"] for issue in issues]
+        pre_codes = [
+            issue["code"] for issue in issues if issue["side"] == "pre"
+        ]
         self.assertIn("undefined_name", codes)
+        self.assertNotIn("incomplete_structure", pre_codes)
         self.assertNotIn("new_undefined_name", codes)
 
     def test_identical_code_ignores_layout_but_not_content(self):

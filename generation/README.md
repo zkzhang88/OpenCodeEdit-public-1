@@ -128,18 +128,36 @@ created next to that input using `<input_stem>_quality_issues.jsonl` and
 `<input_stem>_quality_filtered.jsonl`. Explicit `--report-file` and
 `--filtered-file` values override these derived names.
 
-For pre-edit code, the checker reports only empty output, Markdown fences, and
-clear truncation or incomplete structures. When possible, pre-edit code is
-silently analyzed as the baseline for identifying issues introduced by the
-edit. Post-edit code receives the complete Python syntax and static-reference
-checks, including undefined names, missing imports, and references made
-unresolvable by an edit. Sample code and third-party imports are never executed.
+For pre-edit code, the checker always reports empty output and Markdown fences.
+Clear truncation or incomplete structures are reported only when post-edit
+cannot be parsed; a post-edit that parses successfully is treated as having
+repaired the incomplete input. When possible, pre-edit code is silently analyzed
+as the baseline for identifying issues introduced by the edit. Post-edit code
+receives the complete Python syntax and static-reference checks, including
+undefined names, missing imports, and references made unresolvable by an edit.
+Sample code and third-party imports are never executed.
 Pre/post code is considered identical when it differs only in blank lines or
 formatting whitespace; whitespace inside strings remains significant.
 Use `--input-file`, `--report-file`, `--filtered-file`, `--pre-field`, and
 `--post-field` to override the defaults. Add `--fail-on-issues` to return a
 non-zero status when rejected samples are found. The checker displays a `tqdm`
 progress bar by default; use `--no-progress` to disable it.
+
+To inspect selected rejected samples, export their source code by report line
+number:
+
+```bash
+python3 generation/export_quality_issue_code.py \
+  --issues-file data/OCEData/ocedataft_quality_issues.jsonl \
+  --line-number 36 39 57
+```
+
+The source JSONL is inferred from the standard `_quality_issues.jsonl` suffix.
+Each requested record is written under
+`<input_stem>_quality_issue_code/line_NNNNNN/` as `pre_edit.py`, `post_edit.py`,
+and `issues.json`; the JSON metadata also includes the source edit instruction
+as `edit_instruction`. Use `--input-file`, `--output-dir`, or
+`--instruction-field` to override the inferred paths and field name.
 
 
 ## Finetune dataset construction
