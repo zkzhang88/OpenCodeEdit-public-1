@@ -20,6 +20,8 @@ import tokenize
 from typing import Dict, Iterable, List, Optional, Sequence, Set, TextIO, Tuple
 import warnings
 
+from tqdm import tqdm
+
 
 # Default paths are anchored to the repository, so the script behaves the same
 # whether it is launched from the repository root or from generation/.
@@ -784,20 +786,35 @@ def check_jsonl(
     filtered_file: Path,
     pre_field: str = "code_before_purify",
     post_field: str = "code_after_purify",
-    progress_every: int = 5000,
+    show_progress: bool = True,
 ) -> Dict[str, object]:
     """Check a JSONL file and atomically write issue and filtered outputs."""
     _validate_paths(input_file, report_file, filtered_file)
+    # Count records without loading them so tqdm can display a percentage and ETA.
+    record_count = None
+    if show_progress:
+        with input_file.open("r", encoding="utf-8") as count_handle:
+            record_count = sum(1 for _ in count_handle)
+
     issue_counts: Counter = Counter()
     parse_counts: Counter = Counter()
     total = passed = failed = 0
     report_handle, report_tmp = _temporary_output(report_file)
     filtered_handle, filtered_tmp = _temporary_output(filtered_file)
+    progress = None
     try:
         # Process one line at a time to avoid loading the roughly 177 MB source
         # dataset or the generated outputs into memory.
         with input_file.open("r", encoding="utf-8") as input_handle:
-            for line_number, raw_line in enumerate(input_handle, 1):
+            progress = tqdm(
+                enumerate(input_handle, 1),
+                total=record_count,
+                desc="Checking OCEData",
+                unit="record",
+                dynamic_ncols=True,
+                disable=not show_progress,
+            )
+            for line_number, raw_line in progress:
                 total += 1
                 issues: List[Dict[str, object]]
                 record: Optional[Dict[str, object]] = None
@@ -843,12 +860,12 @@ def check_jsonl(
                         raw_line if raw_line.endswith("\n") else raw_line + "\n"
                     )
 
-                if progress_every and total % progress_every == 0:
-                    print(
-                        f"Checked {total:,} records "
-                        f"({passed:,} passed, {failed:,} failed)",
-                        file=sys.stderr,
+                if show_progress:
+                    progress.set_postfix(
+                        passed=f"{passed:,}", failed=f"{failed:,}", refresh=False
                     )
+
+            progress.close()
 
         report_handle.flush()
         filtered_handle.flush()
@@ -861,6 +878,8 @@ def check_jsonl(
         os.replace(report_tmp, report_file)
         os.replace(filtered_tmp, filtered_file)
     except Exception:
+        if progress is not None:
+            progress.close()
         report_handle.close()
         filtered_handle.close()
         for temporary in (report_tmp, filtered_tmp):
@@ -911,6 +930,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Return exit status 1 when at least one record has issues.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the tqdm progress bar.",
+    )
     return parser
 
 
@@ -923,6 +947,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             filtered_file=args.filtered_file,
             pre_field=args.pre_field,
             post_field=args.post_field,
+            show_progress=not args.no_progress,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -147,7 +147,7 @@ class JsonlIntegrationTests(unittest.TestCase):
             )
 
             summary = check_jsonl(
-                source, report, filtered, progress_every=0
+                source, report, filtered, show_progress=False
             )
             self.assertEqual(summary["total"], 3)
             self.assertEqual(summary["passed"], 1)
@@ -163,6 +163,7 @@ class JsonlIntegrationTests(unittest.TestCase):
                         "--report-file", str(root / "issues-2.jsonl"),
                         "--filtered-file", str(root / "filtered-2.jsonl"),
                         "--fail-on-issues",
+                        "--no-progress",
                     ]
                 ),
                 1,
