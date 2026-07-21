@@ -213,6 +213,13 @@ class JsonlIntegrationTests(unittest.TestCase):
                 1,
             )
 
+            self.assertEqual(
+                main(["--input-file", str(source), "--no-progress"]),
+                0,
+            )
+            self.assertTrue((root / "input_quality_issues.jsonl").is_file())
+            self.assertTrue((root / "input_quality_filtered.jsonl").is_file())
+
     def test_rejects_overlapping_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input.jsonl"

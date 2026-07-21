@@ -27,8 +27,6 @@ from tqdm import tqdm
 # whether it is launched from the repository root or from generation/.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = REPO_ROOT / "data" / "OCEData" / "ocedata.jsonl"
-DEFAULT_REPORT = REPO_ROOT / "data" / "OCEData" / "ocedata_quality_issues.jsonl"
-DEFAULT_FILTERED = REPO_ROOT / "data" / "OCEData" / "ocedata_quality_filtered.jsonl"
 
 # These fragments cover parser/tokenizer messages that strongly indicate a
 # truncated snippet rather than an ordinary syntax mistake.
@@ -923,13 +921,29 @@ def print_summary(summary: Dict[str, object]) -> None:
     print(f"Filtered data: {summary['filtered_file']}")
 
 
+def default_output_path(input_file: Path, suffix: str) -> Path:
+    """Derive a sibling JSONL output path from the input file name."""
+    extension = input_file.suffix or ".jsonl"
+    return input_file.with_name(f"{input_file.stem}{suffix}{extension}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Statically check pre-edit and post-edit Python in OCEData."
     )
     parser.add_argument("--input-file", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--report-file", type=Path, default=DEFAULT_REPORT)
-    parser.add_argument("--filtered-file", type=Path, default=DEFAULT_FILTERED)
+    parser.add_argument(
+        "--report-file",
+        type=Path,
+        default=None,
+        help="Issue report path (default: <input_stem>_quality_issues.jsonl).",
+    )
+    parser.add_argument(
+        "--filtered-file",
+        type=Path,
+        default=None,
+        help="Filtered output path (default: <input_stem>_quality_filtered.jsonl).",
+    )
     parser.add_argument("--pre-field", default="code_before_purify")
     parser.add_argument("--post-field", default="code_after_purify")
     parser.add_argument(
@@ -947,11 +961,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    report_file = args.report_file or default_output_path(
+        args.input_file, "_quality_issues"
+    )
+    filtered_file = args.filtered_file or default_output_path(
+        args.input_file, "_quality_filtered"
+    )
     try:
         summary = check_jsonl(
             input_file=args.input_file,
-            report_file=args.report_file,
-            filtered_file=args.filtered_file,
+            report_file=report_file,
+            filtered_file=filtered_file,
             pre_field=args.pre_field,
             post_field=args.post_field,
             show_progress=not args.no_progress,

@@ -123,6 +123,11 @@ By default, it checks `data/OCEData/ocedata.jsonl` and writes:
 - `data/OCEData/ocedata_quality_filtered.jsonl`, containing the original JSONL
   lines that passed every check.
 
+When `--input-file` is changed and output paths are omitted, both outputs are
+created next to that input using `<input_stem>_quality_issues.jsonl` and
+`<input_stem>_quality_filtered.jsonl`. Explicit `--report-file` and
+`--filtered-file` values override these derived names.
+
 For pre-edit code, the checker reports only empty output, Markdown fences, and
 clear truncation or incomplete structures. When possible, pre-edit code is
 silently analyzed as the baseline for identifying issues introduced by the
