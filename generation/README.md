@@ -169,11 +169,34 @@ python3 generation/export_filtered_samples.py 10
 By default, this reads `data/OCEData/ocedataft_quality_filtered.jsonl` and
 writes each record to
 `data/OCEData/ocedataft_quality_filtered_samples/line_NNNNNN/`. Each record
-directory contains `pre_edit.py`, `post_edit.py`, and `instruction.jsonl`.
-The JSONL record contains `instruct_purify`, `commit`, and `instr_type`. Use
-`--input-file` and `--output-dir` to choose other paths; the source field names
-can be overridden with `--pre-field`, `--post-field`, and
-`--instruction-field`.
+directory contains `pre_edit.py`, `post_edit.py`, and `instruction.json`.
+The human-readable, indented JSON object contains `instruct_purify`, `commit`,
+and `instr_type`, followed by seven manual-review fields initialized to JSON
+`null`:
+
+- `manual_pre_edit_is_reasonable_program`
+- `manual_pre_edit_does_not_satisfy_instruction`
+- `manual_instruction_is_clear_and_actionable`
+- `manual_post_edit_is_reasonable_program`
+- `manual_post_edit_fulfills_instruction`
+- `manual_post_edit_has_unrelated_changes`
+- `manual_post_edit_has_new_defects`
+
+Reviewers can replace each `null` with `true` or `false`. Use `--input-file`
+and `--output-dir` to choose other paths; the source field names can be
+overridden with `--pre-field`, `--post-field`, and `--instruction-field`.
+
+To export the first `k` records for one or more instruction types, pass the
+types to `--instr-type`:
+
+```bash
+python3 generation/export_filtered_samples.py 10 \
+  --instr-type ds_descriptive qwen3_descriptive
+```
+
+In this mode, the positional number is applied to each requested type. Records
+are written below type-named directories such as
+`ocedataft_quality_filtered_samples/ds_descriptive/line_NNNNNN/`.
 
 
 ## Finetune dataset construction

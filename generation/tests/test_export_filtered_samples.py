@@ -3,7 +3,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from generation.export_filtered_samples import export_first_samples, main
+from generation.export_filtered_samples import (
+    MANUAL_REVIEW_FIELDS,
+    export_first_samples,
+    main,
+)
 
 
 class ExportFilteredSamplesTests(unittest.TestCase):
@@ -49,6 +53,9 @@ class ExportFilteredSamplesTests(unittest.TestCase):
         (old_record_dir / "instruction.txt").write_text(
             "stale instruction", encoding="utf-8"
         )
+        (old_record_dir / "instruction.jsonl").write_text(
+            '{"stale": true}\n', encoding="utf-8"
+        )
         exported = export_first_samples(self.input_file, 2, output_dir)
 
         self.assertEqual(
@@ -64,7 +71,7 @@ class ExportFilteredSamplesTests(unittest.TestCase):
             "def new():\n    return 1\n",
         )
         instruction_record = json.loads(
-            (exported[1] / "instruction.jsonl").read_text(encoding="utf-8")
+            (exported[1] / "instruction.json").read_text(encoding="utf-8")
         )
         self.assertEqual(
             instruction_record,
@@ -72,14 +79,64 @@ class ExportFilteredSamplesTests(unittest.TestCase):
                 "instruct_purify": "Implement and rename the function.\n",
                 "commit": "commit-2",
                 "instr_type": "lazy",
+                **{field: None for field in MANUAL_REVIEW_FIELDS},
             },
         )
+        self.assertEqual(
+            list(instruction_record)[-len(MANUAL_REVIEW_FIELDS) :],
+            list(MANUAL_REVIEW_FIELDS),
+        )
         self.assertFalse((exported[1] / "instruction.txt").exists())
+        self.assertFalse((exported[1] / "instruction.jsonl").exists())
+        instruction_text = (exported[1] / "instruction.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertTrue(instruction_text.startswith("{\n  \"instruct_purify\""))
+        self.assertTrue(instruction_text.endswith("\n"))
         self.assertFalse((output_dir / "line_000003").exists())
 
     def test_rejects_non_positive_count(self):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             export_first_samples(self.input_file, 0, self.root / "samples")
+
+    def test_exports_first_k_records_for_each_requested_type(self):
+        output_dir = self.root / "by-type"
+        exported = export_first_samples(
+            self.input_file,
+            1,
+            output_dir,
+            instr_types=["descriptive", "lazy"],
+        )
+
+        self.assertEqual(
+            exported,
+            [
+                output_dir / "descriptive" / "line_000001",
+                output_dir / "lazy" / "line_000002",
+            ],
+        )
+        for record_dir in exported:
+            self.assertTrue((record_dir / "pre_edit.py").is_file())
+            self.assertTrue((record_dir / "post_edit.py").is_file())
+            self.assertTrue((record_dir / "instruction.json").is_file())
+
+    def test_reports_type_with_fewer_than_k_records(self):
+        with self.assertRaisesRegex(ValueError, "lazy: found 1/2"):
+            export_first_samples(
+                self.input_file,
+                2,
+                self.root / "by-type",
+                instr_types=["lazy"],
+            )
+
+    def test_rejects_instr_type_that_would_create_nested_directories(self):
+        with self.assertRaisesRegex(ValueError, "cannot be used"):
+            export_first_samples(
+                self.input_file,
+                1,
+                self.root / "by-type",
+                instr_types=["../lazy"],
+            )
 
     def test_reports_when_input_has_fewer_than_n_records(self):
         with self.assertRaisesRegex(ValueError, "contains only 3 lines"):
@@ -101,7 +158,7 @@ class ExportFilteredSamplesTests(unittest.TestCase):
         )
         self.assertTrue((output_dir / "line_000001" / "pre_edit.py").is_file())
         self.assertTrue(
-            (output_dir / "line_000001" / "instruction.jsonl").is_file()
+            (output_dir / "line_000001" / "instruction.json").is_file()
         )
 
 
