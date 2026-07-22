@@ -169,7 +169,8 @@ python3 generation/export_filtered_samples.py 10
 By default, this reads `data/OCEData/ocedataft_quality_filtered.jsonl` and
 writes each record to
 `data/OCEData/ocedataft_quality_filtered_samples/line_NNNNNN/`. Each record
-directory contains `pre_edit.py`, `post_edit.py`, and `instruction.txt`. Use
+directory contains `pre_edit.py`, `post_edit.py`, and `instruction.jsonl`.
+The JSONL record contains `instruct_purify`, `commit`, and `instr_type`. Use
 `--input-file` and `--output-dir` to choose other paths; the source field names
 can be overridden with `--pre-field`, `--post-field`, and
 `--instruction-field`.

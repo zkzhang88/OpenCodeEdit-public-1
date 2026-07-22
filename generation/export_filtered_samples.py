@@ -34,6 +34,14 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
 
 
+def _write_jsonl(path: Path, record: dict) -> None:
+    """Write one JSON object as a UTF-8 JSONL record."""
+    path.write_text(
+        json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def export_first_samples(
     input_file: Path,
     count: int,
@@ -65,12 +73,23 @@ def export_first_samples(
             pre_code = _required_string(record, pre_field, line_number)
             post_code = _required_string(record, post_field, line_number)
             instruction = _required_string(record, instruction_field, line_number)
+            commit = _required_string(record, "commit", line_number)
+            instr_type = _required_string(record, "instr_type", line_number)
 
             record_dir = output_dir / f"line_{line_number:06d}"
             record_dir.mkdir(parents=True, exist_ok=True)
             _write_text(record_dir / "pre_edit.py", pre_code)
             _write_text(record_dir / "post_edit.py", post_code)
-            _write_text(record_dir / "instruction.txt", instruction)
+            _write_jsonl(
+                record_dir / "instruction.jsonl",
+                {
+                    instruction_field: instruction,
+                    "commit": commit,
+                    "instr_type": instr_type,
+                },
+            )
+            # Remove the file produced by older versions when reusing an output dir.
+            (record_dir / "instruction.txt").unlink(missing_ok=True)
             exported_dirs.append(record_dir)
 
     if len(exported_dirs) < count:
