@@ -159,6 +159,21 @@ and `issues.json`; the JSON metadata also includes the source edit instruction
 as `edit_instruction`. Use `--input-file`, `--output-dir`, or
 `--instruction-field` to override the inferred paths and field name.
 
+To inspect the first `n` records of the filtered finetuning dataset in a
+human-readable layout, run from the repository root:
+
+```bash
+python3 generation/export_filtered_samples.py 10
+```
+
+By default, this reads `data/OCEData/ocedataft_quality_filtered.jsonl` and
+writes each record to
+`data/OCEData/ocedataft_quality_filtered_samples/line_NNNNNN/`. Each record
+directory contains `pre_edit.py`, `post_edit.py`, and `instruction.txt`. Use
+`--input-file` and `--output-dir` to choose other paths; the source field names
+can be overridden with `--pre-field`, `--post-field`, and
+`--instruction-field`.
+
 
 ## Finetune dataset construction
 After data mixing and filtering, you can run `generate_finetune_dataset.py` to construct a formatted dataset for downstream finetuning:

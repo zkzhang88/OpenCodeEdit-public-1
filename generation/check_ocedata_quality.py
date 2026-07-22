@@ -623,8 +623,8 @@ def _undefined_issue_code(
     ):
         return "missing_import"
     # A binding can only become unresolvable in the forward edit direction.
-    # When checking pre-edit, a definition added by post-edit does not mean the
-    # name was "previously bound"; it is simply undefined in the pre-edit code.
+    # When checking pre-edit, a definition added by post-edit does not make the
+    # reference resolvable in the pre-edit code; it is simply undefined there.
     if side == "post" and other is not None and name in other.all_bindings:
         return "unresolvable_reference"
     return "undefined_name"
@@ -644,7 +644,7 @@ def reference_issues(
         if code == "missing_import":
             message = f"Name '{name}' is used like a module but is not imported"
         elif code == "unresolvable_reference":
-            message = f"Name '{name}' was previously bound but is no longer resolvable"
+            message = f"Reference to name '{name}' cannot be resolved at this location"
         else:
             message = f"Name '{name}' has no visible binding"
         issues.append(

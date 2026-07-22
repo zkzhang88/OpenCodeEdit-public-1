@@ -52,9 +52,27 @@ def outer(arg):
     def test_removed_definition_becomes_unresolvable(self):
         before = "def helper():\n    return 1\nresult = helper()\n"
         after = "result = helper()\n"
-        codes = issue_codes({PRE: before, POST: after})
+        issues, _ = inspect_pair({PRE: before, POST: after}, PRE, POST)
+        codes = [issue["code"] for issue in issues]
         self.assertIn("unresolvable_reference", codes)
         self.assertIn("new_unresolvable_reference", codes)
+        messages = [
+            issue["message"]
+            for issue in issues
+            if issue["code"] in {
+                "unresolvable_reference",
+                "new_unresolvable_reference",
+            }
+        ]
+        self.assertEqual(
+            messages,
+            [
+                "Reference to name 'helper' cannot be resolved at this location",
+                "Post-edit introduced: Reference to name 'helper' cannot be "
+                "resolved at this location",
+            ],
+        )
+        self.assertTrue(all("previously bound" not in message for message in messages))
 
     def test_definition_added_by_post_does_not_reverse_pre_issue_direction(self):
         before = "result = parse_article(url)\n"
