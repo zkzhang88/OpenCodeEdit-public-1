@@ -179,12 +179,14 @@ and `instr_type`, followed by seven manual-review fields initialized to JSON
 - `manual_instruction_is_clear_and_actionable`
 - `manual_post_edit_is_reasonable_program`
 - `manual_post_edit_fulfills_instruction`
-- `manual_post_edit_has_unrelated_changes`
-- `manual_post_edit_has_new_defects`
+- `manual_post_edit_has_no_unrelated_changes`
+- `manual_post_edit_has_no_new_defects`
 
-Reviewers can replace each `null` with `true` or `false`. Use `--input-file`
-and `--output-dir` to choose other paths; the source field names can be
-overridden with `--pre-field`, `--post-field`, and `--instruction-field`.
+Reviewers can replace each `null` with `true` or `false`; all seven fields use
+positive wording, so `true` consistently indicates a passing assessment. Use
+`--input-file` and `--output-dir` to choose other paths; the source field names
+can be overridden with `--pre-field`, `--post-field`, and
+`--instruction-field`.
 
 To export the first `k` records for one or more instruction types, pass the
 types to `--instr-type`:

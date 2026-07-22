@@ -13,7 +13,7 @@ from typing import List, Optional, Sequence
 DEFAULT_INPUT_FILE = Path("data/OCEData/ocedataft_quality_filtered.jsonl")
 
 MANUAL_REVIEW_FIELDS = (
-    # pre-edit code 是否构成合理程序。
+    # pre-edit code 是否构成合理的程序。
     "manual_pre_edit_is_reasonable_program",
     # pre-edit 是否确实尚未满足 instruction。
     "manual_pre_edit_does_not_satisfy_instruction",
@@ -23,10 +23,10 @@ MANUAL_REVIEW_FIELDS = (
     "manual_post_edit_is_reasonable_program",
     # post-edit 是否完成了编辑指令。
     "manual_post_edit_fulfills_instruction",
-    # post-edit 是否引入了与编辑指令无关的修改。
-    "manual_post_edit_has_unrelated_changes",
-    # post-edit 是否引入了 pre-edit 中不存在的新缺陷。
-    "manual_post_edit_has_new_defects",
+    # post-edit 是否没有引入与编辑指令无关的修改。
+    "manual_post_edit_has_no_unrelated_changes",
+    # post-edit 是否没有引入 pre-edit 中不存在的新缺陷。
+    "manual_post_edit_has_no_new_defects",
 )
 
 
