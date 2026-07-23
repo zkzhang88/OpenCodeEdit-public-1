@@ -21,6 +21,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, TextIO, Tuple
 import warnings
 
 from tqdm import tqdm
+import yaml
 
 
 # Default paths are anchored to the repository, so the script behaves the same
@@ -770,12 +771,18 @@ def inspect_pair(
     return issues, parse_counts
 
 
-def _validate_paths(input_file: Path, report_file: Path, filtered_file: Path) -> None:
-    resolved = [path.expanduser().resolve() for path in (
-        input_file, report_file, filtered_file
-    )]
-    if len(set(resolved)) != 3:
-        raise ValueError("Input, report, and filtered paths must all be different")
+def _validate_paths(
+    input_file: Path,
+    report_file: Path,
+    filtered_file: Path,
+    summary_file: Optional[Path] = None,
+) -> None:
+    paths = [input_file, report_file, filtered_file]
+    if summary_file is not None:
+        paths.append(summary_file)
+    resolved = [path.expanduser().resolve() for path in paths]
+    if len(set(resolved)) != len(resolved):
+        raise ValueError("Input and output paths must all be different")
     if not resolved[0].is_file():
         raise FileNotFoundError(f"Input file not found: {input_file}")
 
@@ -801,9 +808,10 @@ def check_jsonl(
     pre_field: str = "code_before_purify",
     post_field: str = "code_after_purify",
     show_progress: bool = True,
+    summary_file: Optional[Path] = None,
 ) -> Dict[str, object]:
-    """Check a JSONL file and atomically write issue and filtered outputs."""
-    _validate_paths(input_file, report_file, filtered_file)
+    """Check JSONL and atomically write issue, filtered, and summary outputs."""
+    _validate_paths(input_file, report_file, filtered_file, summary_file)
     # Count records without loading them so tqdm can display a percentage and ETA.
     record_count = None
     if show_progress:
@@ -903,7 +911,8 @@ def check_jsonl(
                 pass
         raise
 
-    return {
+    summary: Dict[str, object] = {
+        "python_runtime": sys.version.split()[0],
         "total": total,
         "passed": passed,
         "failed": failed,
@@ -912,10 +921,37 @@ def check_jsonl(
         "report_file": str(report_file),
         "filtered_file": str(filtered_file),
     }
+    if summary_file is not None:
+        summary["summary_file"] = str(summary_file)
+        write_summary_yaml(summary, summary_file)
+    return summary
+
+
+def write_summary_yaml(summary: Dict[str, object], summary_file: Path) -> None:
+    """Atomically write the terminal summary data as UTF-8 YAML."""
+    summary_handle, summary_tmp = _temporary_output(summary_file)
+    try:
+        yaml.safe_dump(
+            summary,
+            summary_handle,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        summary_handle.flush()
+        os.fsync(summary_handle.fileno())
+        summary_handle.close()
+        os.replace(summary_tmp, summary_file)
+    except Exception:
+        summary_handle.close()
+        try:
+            summary_tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def print_summary(summary: Dict[str, object]) -> None:
-    print(f"Python runtime: {sys.version.split()[0]}")
+    print(f"Python runtime: {summary['python_runtime']}")
     print(
         f"Records: {summary['total']} total, "
         f"{summary['passed']} passed, {summary['failed']} failed"
@@ -928,12 +964,19 @@ def print_summary(summary: Dict[str, object]) -> None:
         print(f"  {name}: {count}")
     print(f"Issue report: {summary['report_file']}")
     print(f"Filtered data: {summary['filtered_file']}")
+    if "summary_file" in summary:
+        print(f"Summary YAML: {summary['summary_file']}")
 
 
 def default_output_path(input_file: Path, suffix: str) -> Path:
     """Derive a sibling JSONL output path from the input file name."""
     extension = input_file.suffix or ".jsonl"
     return input_file.with_name(f"{input_file.stem}{suffix}{extension}")
+
+
+def default_summary_path(input_file: Path) -> Path:
+    """Derive the sibling YAML summary path from the input file name."""
+    return input_file.with_name(f"{input_file.stem}_quality_summary.yaml")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -952,6 +995,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Filtered output path (default: <input_stem>_quality_filtered.jsonl).",
+    )
+    parser.add_argument(
+        "--summary-file",
+        type=Path,
+        default=None,
+        help="YAML summary path (default: <input_stem>_quality_summary.yaml).",
     )
     parser.add_argument("--pre-field", default="code_before_purify")
     parser.add_argument("--post-field", default="code_after_purify")
@@ -976,11 +1025,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     filtered_file = args.filtered_file or default_output_path(
         args.input_file, "_quality_filtered"
     )
+    summary_file = args.summary_file or default_summary_path(args.input_file)
     try:
         summary = check_jsonl(
             input_file=args.input_file,
             report_file=report_file,
             filtered_file=filtered_file,
+            summary_file=summary_file,
             pre_field=args.pre_field,
             post_field=args.post_field,
             show_progress=not args.no_progress,

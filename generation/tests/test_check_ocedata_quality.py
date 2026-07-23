@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+
+import yaml
 
 from generation.check_ocedata_quality import (
     check_jsonl,
@@ -229,6 +232,7 @@ class JsonlIntegrationTests(unittest.TestCase):
             source = root / "input.jsonl"
             report = root / "issues.jsonl"
             filtered = root / "filtered.jsonl"
+            summary_file = root / "summary.yaml"
             valid = {PRE: "x = 1\n", POST: "x = 2\n", "commit": "good"}
             invalid = {PRE: "x = 1\n", POST: "x = missing\n", "commit": "bad"}
             source.write_text(
@@ -239,14 +243,23 @@ class JsonlIntegrationTests(unittest.TestCase):
             )
 
             summary = check_jsonl(
-                source, report, filtered, show_progress=False
+                source,
+                report,
+                filtered,
+                summary_file=summary_file,
+                show_progress=False,
             )
             self.assertEqual(summary["total"], 3)
             self.assertEqual(summary["passed"], 1)
             self.assertEqual(summary["failed"], 2)
+            self.assertEqual(summary["python_runtime"], sys.version.split()[0])
             self.assertEqual(len(report.read_text(encoding="utf-8").splitlines()), 2)
             self.assertEqual(
                 json.loads(filtered.read_text(encoding="utf-8"))["commit"], "good"
+            )
+            self.assertEqual(
+                yaml.safe_load(summary_file.read_text(encoding="utf-8")),
+                summary,
             )
             self.assertEqual(
                 main(
@@ -254,6 +267,7 @@ class JsonlIntegrationTests(unittest.TestCase):
                         "--input-file", str(source),
                         "--report-file", str(root / "issues-2.jsonl"),
                         "--filtered-file", str(root / "filtered-2.jsonl"),
+                        "--summary-file", str(root / "summary-2.yaml"),
                         "--fail-on-issues",
                         "--no-progress",
                     ]
@@ -267,6 +281,15 @@ class JsonlIntegrationTests(unittest.TestCase):
             )
             self.assertTrue((root / "input_quality_issues.jsonl").is_file())
             self.assertTrue((root / "input_quality_filtered.jsonl").is_file())
+            default_summary = root / "input_quality_summary.yaml"
+            self.assertTrue(default_summary.is_file())
+            default_summary_data = yaml.safe_load(
+                default_summary.read_text(encoding="utf-8")
+            )
+            self.assertEqual(default_summary_data["total"], 3)
+            self.assertEqual(
+                default_summary_data["summary_file"], str(default_summary)
+            )
 
     def test_rejects_overlapping_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -274,6 +297,13 @@ class JsonlIntegrationTests(unittest.TestCase):
             source.write_text("{}\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 check_jsonl(source, source, Path(directory) / "filtered.jsonl")
+            with self.assertRaises(ValueError):
+                check_jsonl(
+                    source,
+                    Path(directory) / "issues.jsonl",
+                    Path(directory) / "filtered.jsonl",
+                    summary_file=source,
+                )
 
 
 if __name__ == "__main__":

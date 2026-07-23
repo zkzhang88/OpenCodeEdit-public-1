@@ -121,12 +121,16 @@ By default, it checks `data/OCEData/ocedata.jsonl` and writes:
 - `data/OCEData/ocedata_quality_issues.jsonl`, with one structured report
   record for every rejected sample;
 - `data/OCEData/ocedata_quality_filtered.jsonl`, containing the original JSONL
-  lines that passed every check.
+  lines that passed every check;
+- `data/OCEData/ocedata_quality_summary.yaml`, containing the Python runtime,
+  record totals, parser and issue counts, and output paths also shown in the
+  terminal summary.
 
-When `--input-file` is changed and output paths are omitted, both outputs are
-created next to that input using `<input_stem>_quality_issues.jsonl` and
-`<input_stem>_quality_filtered.jsonl`. Explicit `--report-file` and
-`--filtered-file` values override these derived names.
+When `--input-file` is changed and output paths are omitted, all outputs are
+created next to that input using `<input_stem>_quality_issues.jsonl`,
+`<input_stem>_quality_filtered.jsonl`, and
+`<input_stem>_quality_summary.yaml`. Explicit `--report-file`,
+`--filtered-file`, and `--summary-file` values override these derived names.
 
 For pre-edit code, the checker always reports empty output and Markdown fences.
 Clear truncation or incomplete structures are reported only when post-edit
@@ -138,10 +142,11 @@ undefined names, missing imports, and references made unresolvable by an edit.
 Sample code and third-party imports are never executed.
 Pre/post code is considered identical when it differs only in blank lines or
 formatting whitespace; whitespace inside strings remains significant.
-Use `--input-file`, `--report-file`, `--filtered-file`, `--pre-field`, and
-`--post-field` to override the defaults. Add `--fail-on-issues` to return a
-non-zero status when rejected samples are found. The checker displays a `tqdm`
-progress bar by default; use `--no-progress` to disable it.
+Use `--input-file`, `--report-file`, `--filtered-file`, `--summary-file`,
+`--pre-field`, and `--post-field` to override the defaults. Add
+`--fail-on-issues` to return a non-zero status when rejected samples are found.
+The checker displays a `tqdm` progress bar by default; use `--no-progress` to
+disable it.
 
 To inspect selected rejected samples, export their source code by report line
 number:
