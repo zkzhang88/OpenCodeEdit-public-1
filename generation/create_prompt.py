@@ -199,7 +199,7 @@ if __name__ == "__main__":
         create_prompt(
             commit_input_path='data/commitpackft_python_cleaned.jsonl',
             oneshot_input_path='few-shot/1-shot-prompt_final_chose.jsonl',
-            prompt_version='v5.1',
+            prompt_version='v5.2',
             prompt_output_path='data/prompt_for_syn.jsonl',
             min_snippet_lines=5,
             max_snippet_lines=15,

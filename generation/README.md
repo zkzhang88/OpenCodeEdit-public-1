@@ -28,7 +28,7 @@ First, run `create_prompt.py` to construct prompts for data synthesis from `comm
 python create_prompt.py
 ```
 
-This command creates a jsonl file `prompt_for_syn.jsonl` in `./data/` folder, which serves as the prompt input for the LLM. 
+This command uses the `v5.2` two-round code-editing prompt and creates a jsonl file `prompt_for_syn.jsonl` in the `./data/` folder, which serves as the prompt input for the LLM.
 
 > We also provide the prompt for commit rewriting. You can construct such prompts by setting the `--prompt_type` parameter as follow:
 > ```bash
