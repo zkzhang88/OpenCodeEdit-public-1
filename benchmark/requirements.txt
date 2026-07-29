@@ -1,0 +1,2 @@
+pyarrow==20.0.0
+Pygments==2.19.2
