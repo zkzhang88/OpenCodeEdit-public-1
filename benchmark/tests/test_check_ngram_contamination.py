@@ -13,6 +13,7 @@ from benchmark.check_ngram_contamination import (
     exact_containment,
     load_codeeditor_file,
     run_detection,
+    run_multi_detection,
     scan_commitpack,
     tokenize_code,
     unique_ngrams,
@@ -271,3 +272,81 @@ def test_end_to_end_writes_nine_independent_subsets(tmp_path):
     ) as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 9
+
+
+def test_multi_detection_reports_each_size_separately(tmp_path):
+    commitpack = tmp_path / "commitpack.jsonl"
+    shared = "def add(a, b): value = a + b; return value"
+    _write_jsonl(
+        commitpack,
+        [{
+            "commit": "abc",
+            "repos": "owner/repo",
+            "old_file": "math.py",
+            "old_contents": shared,
+        }],
+    )
+
+    canitedit = tmp_path / "canitedit.parquet"
+    pq.write_table(
+        pa.table({"id": [1], "before": [shared], "after": [shared]}),
+        canitedit,
+    )
+
+    codeeditor_dir = tmp_path / "codeeditor"
+    rows_by_file = {
+        "code_debug_primary.jsonl": [{
+            "idx": 10, "code_language": "python3",
+            "incorrect_solutions": shared, "solutions": shared,
+        }],
+        "code_debug_plus.jsonl": [{
+            "idx": 11, "code_language": "python3",
+            "incorrect_solutions": shared, "solutions": shared,
+        }],
+        "code_polishment_primary.jsonl": [{
+            "idx": 12, "source_lang": "python", "source_code": shared,
+        }],
+        "code_polishment_plus.jsonl": [{
+            "idx": 13, "source_lang": "python", "source_code": shared,
+        }],
+        "code_switch_primary.jsonl": [{
+            "idx": 14, "language": "python",
+            "similar_source_code": shared, "target_source_code": shared,
+        }],
+        "code_switch_plus.jsonl": [{
+            "idx": 15, "language": "python",
+            "similar_source_code": shared, "target_source_code": shared,
+        }],
+        "code_translate_primary.jsonl": [{
+            "idx": 16, "source_lang": "python", "target_lang": "java",
+            "source_code": shared, "target_code": "class A {}",
+        }],
+        "code_translate_plus.jsonl": [{
+            "idx": 17, "source_lang": "java", "target_lang": "python",
+            "source_code": "class A {}", "target_code": shared,
+        }],
+    }
+    for filename, rows in rows_by_file.items():
+        _write_jsonl(codeeditor_dir / filename, rows)
+
+    output_dir = tmp_path / "results"
+    index = run_multi_detection(
+        commitpack,
+        canitedit,
+        codeeditor_dir,
+        output_dir,
+        ngram_sizes=[2, 4],
+        threshold=0.8,
+        top_k=1,
+    )
+
+    assert len(index) == 18
+    assert {row["ngram_size"] for row in index} == {2, 4}
+    assert (output_dir / "ngram_2" / "summary_index.csv").is_file()
+    assert (output_dir / "ngram_4" / "summary_index.csv").is_file()
+    with (output_dir / "summary_index.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 18
+    assert {row["ngram_size"] for row in rows} == {"2", "4"}

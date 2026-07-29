@@ -30,6 +30,7 @@ DEFAULT_CANITEDIT = Path(
 )
 DEFAULT_CODEEDITOR_DIR = Path("benchmark/data/CodeEditorBench")
 DEFAULT_OUTPUT_DIR = Path("benchmark/data/contamination_results")
+DEFAULT_NGRAM_SIZES = (5, 10, 20)
 
 CODEEDITOR_FILES = (
     "code_debug_primary.jsonl",
@@ -783,6 +784,60 @@ def run_detection(
     )
 
 
+def run_multi_detection(
+    commitpack_path: Path,
+    canitedit_path: Path,
+    codeeditor_dir: Path,
+    output_dir: Path,
+    ngram_sizes: Sequence[int] = DEFAULT_NGRAM_SIZES,
+    threshold: float = 0.8,
+    top_k: int = 5,
+) -> List[Dict[str, object]]:
+    """Run independent scans for multiple n-gram sizes.
+
+    The scans are deliberately sequential so that only one benchmark inverted
+    index is resident in memory at a time. Each size gets an isolated output
+    directory, while the root summary index contains all subset/size rows.
+    """
+
+    sizes = tuple(dict.fromkeys(ngram_sizes))
+    if not sizes or any(size <= 0 for size in sizes):
+        raise ValueError("ngram_sizes must contain positive integers")
+
+    combined_rows: List[Dict[str, object]] = []
+    for ngram_size in sizes:
+        size_output_dir = output_dir / f"ngram_{ngram_size}"
+        rows = run_detection(
+            commitpack_path=commitpack_path,
+            canitedit_path=canitedit_path,
+            codeeditor_dir=codeeditor_dir,
+            output_dir=size_output_dir,
+            ngram_size=ngram_size,
+            threshold=threshold,
+            top_k=top_k,
+        )
+        for row in rows:
+            combined_rows.append({"ngram_size": ngram_size, **row})
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "ngram_size",
+        "subset",
+        "total_tasks",
+        "contaminated_tasks",
+        "contamination_rate",
+        "total_code_fields",
+        "max_containment",
+    ]
+    with (output_dir / "summary_index.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(combined_rows)
+    return combined_rows
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -796,7 +851,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--codeeditor-dir", type=Path, default=DEFAULT_CODEEDITOR_DIR
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--ngram-size", type=int, default=10)
+    ngram_group = parser.add_mutually_exclusive_group()
+    ngram_group.add_argument(
+        "--ngram-size",
+        type=int,
+        help="run one n-gram size and keep the legacy flat output layout",
+    )
+    ngram_group.add_argument(
+        "--ngram-sizes",
+        type=int,
+        nargs="+",
+        help="run multiple sizes (default: 5 10 20)",
+    )
     parser.add_argument("--threshold", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=5)
     return parser
@@ -804,24 +870,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.ngram_size <= 0:
-        raise SystemExit("--ngram-size must be positive")
+    ngram_sizes = (
+        [args.ngram_size]
+        if args.ngram_size is not None
+        else (args.ngram_sizes or list(DEFAULT_NGRAM_SIZES))
+    )
+    if any(size <= 0 for size in ngram_sizes):
+        raise SystemExit("n-gram sizes must be positive")
     if not 0.0 <= args.threshold <= 1.0:
         raise SystemExit("--threshold must be between 0 and 1")
     if args.top_k <= 0:
         raise SystemExit("--top-k must be positive")
-    rows = run_detection(
-        commitpack_path=args.commitpack,
-        canitedit_path=args.canitedit,
-        codeeditor_dir=args.codeeditor_dir,
-        output_dir=args.output_dir,
-        ngram_size=args.ngram_size,
-        threshold=args.threshold,
-        top_k=args.top_k,
-    )
+    if args.ngram_size is not None:
+        rows = [
+            {"ngram_size": args.ngram_size, **row}
+            for row in run_detection(
+                commitpack_path=args.commitpack,
+                canitedit_path=args.canitedit,
+                codeeditor_dir=args.codeeditor_dir,
+                output_dir=args.output_dir,
+                ngram_size=args.ngram_size,
+                threshold=args.threshold,
+                top_k=args.top_k,
+            )
+        ]
+    else:
+        rows = run_multi_detection(
+            commitpack_path=args.commitpack,
+            canitedit_path=args.canitedit,
+            codeeditor_dir=args.codeeditor_dir,
+            output_dir=args.output_dir,
+            ngram_sizes=ngram_sizes,
+            threshold=args.threshold,
+            top_k=args.top_k,
+        )
     for row in rows:
         print(
-            f"{row['subset']}: {row['contaminated_tasks']}/"
+            f"{row['ngram_size']}-gram {row['subset']}: "
+            f"{row['contaminated_tasks']}/"
             f"{row['total_tasks']} contaminated "
             f"({float(row['contamination_rate']):.2%})"
         )
