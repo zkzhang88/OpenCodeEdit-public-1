@@ -37,7 +37,14 @@ This command uses the `v5.2` two-round code-editing prompt and creates a jsonl f
 
 The prompt templates can be found in `prompts_for_gen.py`
 
-`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. Configure the API keys, base URLs, and actual API model names in `api_keys.yaml`:
+`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. Copy the tracked template to the ignored local configuration file, then fill in the API keys, base URLs, and actual API model names:
+
+```bash
+cp api_config.example.yaml api_config.yaml
+```
+
+The local `api_config.yaml` should contain:
+
 ```yaml
 QWEN_API_KEY: "sk-xxxx"
 QWEN_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"

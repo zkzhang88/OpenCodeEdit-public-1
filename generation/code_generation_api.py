@@ -9,13 +9,19 @@ from pathlib import Path
 
 
 MAX_RETRIES = 5  # Maximum number of retries
-API_KEY_CONFIG_PATH = str(Path(__file__).resolve().parent / "api_keys.yaml")
+API_CONFIG_PATH = str(Path(__file__).resolve().parent / "api_config.yaml")
 
 def load_api_config(api_config_path: str):
     """Load API keys and base URLs from the YAML config file."""
 
-    with open(api_config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+    try:
+        with open(api_config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"API config file not found: {api_config_path}. Copy "
+            "api_config.example.yaml to api_config.yaml and fill in your credentials."
+        ) from error
 
     required_fields = (
         "QWEN_API_KEY",
@@ -41,7 +47,7 @@ def load_api_config(api_config_path: str):
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_API_MODEL_NAME,
-) = load_api_config(API_KEY_CONFIG_PATH)
+) = load_api_config(API_CONFIG_PATH)
 
 
 def load_completed_task_ids(output_path, expected_task_ids, model_name):
