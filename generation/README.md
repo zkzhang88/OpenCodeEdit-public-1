@@ -37,11 +37,12 @@ This command uses the `v5.2` two-round code-editing prompt and creates a jsonl f
 
 The prompt templates can be found in `prompts_for_gen.py`
 
-`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. If you have obtained an API key, please replace the following content at the beginning of the `code_generation_api.py` file with your API Key:
-```python
-# Replace sk-xxxx with your API Keys
-QWEN_API_KEY = "sk-xxxx"
-DEEPSEEK_API_KEY = "sk-xxxx"
+`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. Configure both the API keys and base URLs in `api_keys.yaml`:
+```yaml
+QWEN_API_KEY: "sk-xxxx"
+QWEN_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEEPSEEK_API_KEY: "sk-xxxx"
+DEEPSEEK_BASE_URL: "https://api.deepseek.com"
 ```
 
 Then, use Qwen3 to generate data by running:

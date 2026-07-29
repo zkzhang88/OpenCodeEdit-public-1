@@ -11,22 +11,30 @@ from pathlib import Path
 MAX_RETRIES = 5  # Maximum number of retries
 API_KEY_CONFIG_PATH = str(Path(__file__).resolve().parent / "api_keys.yaml")
 
-def load_api_keys(api_config_path: str | None = None):
-    """Load API keys from YAML config file."""
+def load_api_config(api_config_path: str):
+    """Load API keys and base URLs from the YAML config file."""
 
     with open(api_config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
-    qwen_api_key = config.get("QWEN_API_KEY")
-    deepseek_api_key = config.get("DEEPSEEK_API_KEY")
+    required_fields = (
+        "QWEN_API_KEY",
+        "QWEN_BASE_URL",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+    )
+    missing_fields = [field for field in required_fields if not config.get(field)]
+    if missing_fields:
+        raise ValueError(
+            f"Missing required fields in YAML config file: {', '.join(missing_fields)}"
+        )
 
-    if not qwen_api_key or not deepseek_api_key:
-        raise ValueError("QWEN_API_KEY or DEEPSEEK_API_KEY not found in YAML config file.")
-
-    return qwen_api_key, deepseek_api_key
+    return tuple(config[field] for field in required_fields)
 
 
-QWEN_API_KEY, DEEPSEEK_API_KEY = load_api_keys(API_KEY_CONFIG_PATH)
+QWEN_API_KEY, QWEN_BASE_URL, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL = (
+    load_api_config(API_KEY_CONFIG_PATH)
+)
 
  # Process each record and call the API
 def api_infer(input_path, output_path, recovery_file, model_name, num_completion=1, max_samples=None, output_fields=None,
@@ -57,13 +65,13 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
     if model_name == "qwen3-32b":
         client = OpenAI(
             api_key=QWEN_API_KEY,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            base_url=QWEN_BASE_URL,
         )
         extra_body = {"enable_thinking": False}  # Disable thinking mode
     elif model_name == "deepseek-chat":
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com",
+            base_url=DEEPSEEK_BASE_URL,
         )
         extra_body = {}
     else:
