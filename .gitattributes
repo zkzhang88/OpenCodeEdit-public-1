@@ -1,1 +1,22 @@
 *.jsonl filter=lfs diff=lfs merge=lfs -text
+
+# Use LF line endings for all text files (Linux/macOS style)
+* text=auto eol=lf
+
+# Keep CRLF line endings for Windows scripts
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Use LF line endings for Bash scripts
+*.sh   text eol=lf
+
+# Use LF line endings for Markdown files
+*.md   text eol=lf
+
+# Do not convert binary files
+*.png  binary
+*.jpg  binary
+*.zip  binary
+*.exe  binary
+*.docx  binary
+*.xlsx  binary
