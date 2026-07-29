@@ -37,12 +37,14 @@ This command uses the `v5.2` two-round code-editing prompt and creates a jsonl f
 
 The prompt templates can be found in `prompts_for_gen.py`
 
-`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. Configure both the API keys and base URLs in `api_keys.yaml`:
+`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. Configure the API keys, base URLs, and actual API model names in `api_keys.yaml`:
 ```yaml
 QWEN_API_KEY: "sk-xxxx"
 QWEN_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_API_MODEL_NAME: "qwen3-32b"
 DEEPSEEK_API_KEY: "sk-xxxx"
 DEEPSEEK_BASE_URL: "https://api.deepseek.com"
+DEEPSEEK_API_MODEL_NAME: "deepseek-chat"
 ```
 
 Then, use Qwen3 to generate data by running:
@@ -50,7 +52,7 @@ Then, use Qwen3 to generate data by running:
 python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_file data/generated_instr_qwen3.jsonl --model_name qwen3-32b
 ```
 
-You can use DeepSeek for generation by setting `--model_name deepseek-chat`, but remember to change the `--output_file` to another name!
+You can use DeepSeek for generation by setting `--model_name deepseek-v3`. The script automatically selects the DeepSeek API key, base URL, and `DEEPSEEK_API_MODEL_NAME`; remember to change the `--output_file` to another name!
 
 The generation process may take several hours or even several days to finish. Every API task is identified by `<prompt_id>:<sample_index>`, and each completed output record is immediately flushed and synced to disk. When `--max_samples` is set, the script processes the first `max_samples` input records in file order. To resume an interrupted run, use the same input, output, model, and sampling arguments, then add `--continue_from_error`:
 

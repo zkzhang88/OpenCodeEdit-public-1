@@ -108,12 +108,35 @@ class ApiRecoveryTests(unittest.TestCase):
 
     def test_output_fields_always_keep_identity_fields(self):
         self.write_input(self.records[:1])
-        self.run_api(FakeClient(), output_fields=["response"])
+        client = FakeClient()
+        with mock.patch.object(
+            code_generation_api,
+            "QWEN_API_MODEL_NAME",
+            "configured-qwen-model",
+        ):
+            self.run_api(client, output_fields=["response"])
 
         output_record = self.read_jsonl(self.output_file)[0]
+        self.assertEqual(client.completions.calls[0]["model"], "configured-qwen-model")
         self.assertEqual(output_record["response"], ["response-1"])
         for field in ("prompt_id", "sample_index", "task_id", "model_name"):
             self.assertIn(field, output_record)
+
+    def test_deepseek_v3_input_uses_configured_api_model(self):
+        self.write_input(self.records[:1])
+        client = FakeClient()
+        with mock.patch.object(
+            code_generation_api,
+            "DEEPSEEK_API_MODEL_NAME",
+            "configured-deepseek-model",
+        ):
+            self.run_api(client, model_name="deepseek-v3")
+
+        self.assertEqual(
+            client.completions.calls[0]["model"],
+            "configured-deepseek-model",
+        )
+        self.assertEqual(self.read_jsonl(self.output_file)[0]["model_name"], "deepseek-v3")
 
     def test_invalid_input_fails_before_api_call(self):
         invalid_inputs = (
@@ -143,7 +166,7 @@ class ApiRecoveryTests(unittest.TestCase):
         cases = (
             ([valid_record, valid_record], "Duplicate task_id"),
             ([{**valid_record, "prompt_id": 2, "task_id": "2:1"}], "not present"),
-            ([{**valid_record, "model_name": "deepseek-chat"}], "different model"),
+            ([{**valid_record, "model_name": "deepseek-v3"}], "different model"),
         )
         for records, message in cases:
             with self.subTest(message=message):

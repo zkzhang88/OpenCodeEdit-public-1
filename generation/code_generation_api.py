@@ -20,8 +20,10 @@ def load_api_config(api_config_path: str):
     required_fields = (
         "QWEN_API_KEY",
         "QWEN_BASE_URL",
+        "QWEN_API_MODEL_NAME",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_MODEL_NAME",
     )
     missing_fields = [field for field in required_fields if not config.get(field)]
     if missing_fields:
@@ -32,9 +34,14 @@ def load_api_config(api_config_path: str):
     return tuple(config[field] for field in required_fields)
 
 
-QWEN_API_KEY, QWEN_BASE_URL, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL = (
-    load_api_config(API_KEY_CONFIG_PATH)
-)
+(
+    QWEN_API_KEY,
+    QWEN_BASE_URL,
+    QWEN_API_MODEL_NAME,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_API_MODEL_NAME,
+) = load_api_config(API_KEY_CONFIG_PATH)
 
 
 def load_completed_task_ids(output_path, expected_task_ids, model_name):
@@ -121,7 +128,7 @@ def api_infer(input_path, output_path, model_name, num_completion=1, max_samples
         input_path (str): Input file path
         output_path (str): Output file path
         model_name (str): Model name. Please check the model list at https://help.aliyun.com/zh/model-studio/getting-started/models;
-                          For DeepSeek API, the model name is "deepseek-chat" or "deepseek-reasoner".
+                          For DeepSeek API, use "deepseek-v3".
         num_completion (int): Number of samples generated for each input, default is 1
         max_samples (int): Number of input samples to select, default is None (no limit)
         output_fields (list): List of output fields, default is None (output all fields)
@@ -143,15 +150,17 @@ def api_infer(input_path, output_path, model_name, num_completion=1, max_samples
             api_key=QWEN_API_KEY,
             base_url=QWEN_BASE_URL,
         )
+        api_model_name = QWEN_API_MODEL_NAME
         extra_body = {"enable_thinking": False}  # Disable thinking mode
-    elif model_name == "deepseek-chat":
+    elif model_name == "deepseek-v3":
         client = OpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL,
         )
+        api_model_name = DEEPSEEK_API_MODEL_NAME
         extra_body = {}
     else:
-        raise ValueError(f"Unsupported model_name: {model_name}. Please use 'qwen3-32b' or 'deepseek-chat'.")
+        raise ValueError(f"Unsupported model_name: {model_name}. Please use 'qwen3-32b' or 'deepseek-v3'.")
 
     # Print all the hyperparameters
     print(f"Model: {model_name}")
@@ -263,7 +272,7 @@ def api_infer(input_path, output_path, model_name, num_completion=1, max_samples
 
                     # Call API to generate response
                     completion = client.chat.completions.create(
-                        model=model_name,
+                        model=api_model_name,
                         messages=input_messages,
                         temperature=temperature,
                         top_p=top_p,
@@ -279,7 +288,7 @@ def api_infer(input_path, output_path, model_name, num_completion=1, max_samples
                             time.sleep(10)  # Wait 10 seconds before retrying
                             print(f"API is busy, retrying {attempt + 1}/{MAX_RETRIES}...")
                             completion = client.chat.completions.create(
-                                model=model_name,
+                                model=api_model_name,
                                 messages=input_messages,
                                 temperature=temperature,
                                 top_p=top_p,
@@ -357,8 +366,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True, help="Input file containing structured prompts")
     parser.add_argument("--output_file", type=str, required=True, help="Output file to save generated instructions")
-    parser.add_argument("--model_name", type=str, required=True, choices=["qwen3-32b", "deepseek-chat"],
-                        help="Model name: 'qwen3-32b' or 'deepseek-chat'")
+    parser.add_argument("--model_name", type=str, required=True, choices=["qwen3-32b", "deepseek-v3"],
+                        help="Model name: 'qwen3-32b' or 'deepseek-v3'")
     parser.add_argument("--continue_from_error", action='store_true', help="Flag to continue from error")
     parser.add_argument("--temperature", type=float, default=0.8, help="Temperature for sampling")
     parser.add_argument("--top_p", type=float, default=0.95, help="Top-p for sampling")
