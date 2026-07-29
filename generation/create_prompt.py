@@ -98,6 +98,7 @@ def create_prompt(commit_input_path, oneshot_input_path, prompt_version, prompt_
                     raise ValueError("Unsupported prompt version")
 
                 filled_prompt = {
+                    "prompt_id": created_prompt_num + 1,
                     "commit": commit_num,
                     "system": system_prompt,
                     "user": user_prompt,
@@ -174,7 +175,7 @@ def create_prompt_rewrite_commit(commit_input_path, oneshot_input_path, prompt_v
             }
 
             # Modified: collect to output_data
-            output_data.append(json.dumps(filled_prompt))
+            output_data.append(filled_prompt)
 
     # Shuffle feature
     if shuffle:
@@ -182,8 +183,9 @@ def create_prompt_rewrite_commit(commit_input_path, oneshot_input_path, prompt_v
 
     # Write to file
     with open(prompt_output_path, 'w', encoding='utf-8') as output_file:
-        for item in output_data:
-            output_file.write(item + '\n')
+        for prompt_id, item in enumerate(output_data, start=1):
+            item['prompt_id'] = prompt_id
+            output_file.write(json.dumps(item) + '\n')
 
     print(f"Total skipped records: {skipped_records}")  # Print total number of skipped records
 

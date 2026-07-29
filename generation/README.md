@@ -28,7 +28,7 @@ First, run `create_prompt.py` to construct prompts for data synthesis from `comm
 python create_prompt.py
 ```
 
-This command uses the `v5.2` two-round code-editing prompt and creates a jsonl file `prompt_for_syn.jsonl` in the `./data/` folder, which serves as the prompt input for the LLM.
+This command uses the `v5.2` two-round code-editing prompt and creates a jsonl file `prompt_for_syn.jsonl` in the `./data/` folder, which serves as the prompt input for the LLM. Each prompt receives a positive integer `prompt_id`, numbered consecutively from `1` in final file order.
 
 > We also provide the prompt for commit rewriting. You can construct such prompts by setting the `--prompt_type` parameter as follow:
 > ```bash
@@ -47,12 +47,18 @@ DEEPSEEK_BASE_URL: "https://api.deepseek.com"
 
 Then, use Qwen3 to generate data by running:
 ```bash
-python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_file data/generated_instr_qwen3.jsonl --recovery_file data/generated_instr_qwen3_recovery.jsonl --model_name qwen3-32b
+python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_file data/generated_instr_qwen3.jsonl --model_name qwen3-32b
 ```
 
-You can use DeepSeek for generation by setting `--model_name deepseek-chat`, but remember to change the `--output_file` and `--recovery_file` to another name!
+You can use DeepSeek for generation by setting `--model_name deepseek-chat`, but remember to change the `--output_file` to another name!
 
-The generation process may take several hours or even several days to finish. The `--recovery_file` is used for recovering from disruption. If the generation process is distruped, please set `--continue_from_error` so as to recover generation from the checkpoint. 
+The generation process may take several hours or even several days to finish. Every API task is identified by `<prompt_id>:<sample_index>`, and each completed output record is immediately flushed and synced to disk. When `--max_samples` is set, the script processes the first `max_samples` input records in file order. To resume an interrupted run, use the same input, output, model, and sampling arguments, then add `--continue_from_error`:
+
+```bash
+python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_file data/generated_instr_qwen3.jsonl --model_name qwen3-32b --continue_from_error
+```
+
+During recovery, the script reconstructs all expected task IDs directly from the input file and skips IDs already present in the output file. The input file must remain unchanged between runs. Without `--continue_from_error`, the script refuses to append to a non-empty output file. Old prompt files without `prompt_id` must be regenerated with `create_prompt.py`, and old response files without `task_id` cannot be resumed.
 
 
 ## Extracting Edit Triplets from Model Responses

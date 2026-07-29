@@ -1,8 +1,8 @@
 import json
 from openai import OpenAI
-import random
 import datetime
 import argparse
+import os
 import time
 import yaml
 from pathlib import Path
@@ -36,16 +36,90 @@ QWEN_API_KEY, QWEN_BASE_URL, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL = (
     load_api_config(API_KEY_CONFIG_PATH)
 )
 
+
+def load_completed_task_ids(output_path, expected_task_ids, model_name):
+    """Read completed task IDs and repair only an incomplete final JSONL line."""
+
+    output_path = Path(output_path)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return set()
+
+    completed_task_ids = set()
+    with open(output_path, 'r+b') as outfile:
+        file_size = os.fstat(outfile.fileno()).st_size
+        while True:
+            line_start = outfile.tell()
+            raw_line = outfile.readline()
+            if not raw_line:
+                break
+            is_last_line = outfile.tell() == file_size
+
+            try:
+                output_data = json.loads(raw_line.decode('utf-8'))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                if is_last_line:
+                    outfile.seek(line_start)
+                    outfile.truncate()
+                    outfile.flush()
+                    os.fsync(outfile.fileno())
+                    break
+                raise ValueError(
+                    f"Invalid output JSONL record at byte offset {line_start}: {error}"
+                ) from error
+
+            required_fields = ('prompt_id', 'sample_index', 'task_id', 'model_name')
+            missing_fields = [
+                field for field in required_fields if field not in output_data
+            ]
+            if missing_fields:
+                raise ValueError(
+                    f"Output record at byte offset {line_start} is missing fields: "
+                    f"{', '.join(missing_fields)}"
+                )
+
+            prompt_id = output_data['prompt_id']
+            sample_index = output_data['sample_index']
+            task_id = output_data['task_id']
+            if (
+                isinstance(prompt_id, bool)
+                or not isinstance(prompt_id, int)
+                or prompt_id <= 0
+                or isinstance(sample_index, bool)
+                or not isinstance(sample_index, int)
+                or sample_index <= 0
+            ):
+                raise ValueError(f"Output task {task_id!r} has invalid identity fields.")
+            if task_id != f"{prompt_id}:{sample_index}":
+                raise ValueError(
+                    f"Output task_id {task_id!r} does not match prompt_id and "
+                    "sample_index."
+                )
+            if output_data['model_name'] != model_name:
+                raise ValueError(f"Output task {task_id} uses a different model_name.")
+            if task_id not in expected_task_ids:
+                raise ValueError(f"Output task {task_id} is not present in the input tasks.")
+            if task_id in completed_task_ids:
+                raise ValueError(f"Duplicate task_id in output: {task_id}")
+            completed_task_ids.add(task_id)
+
+            if is_last_line and not raw_line.endswith(b'\n'):
+                outfile.seek(0, os.SEEK_END)
+                outfile.write(b'\n')
+                outfile.flush()
+                os.fsync(outfile.fileno())
+
+    return completed_task_ids
+
+
  # Process each record and call the API
-def api_infer(input_path, output_path, recovery_file, model_name, num_completion=1, max_samples=None, output_fields=None,
-                 continue_from_error=False, temperature=0.8, top_p=0.95, max_tokens=2048, save_every=1000, random_seed=None, debug=False):
+def api_infer(input_path, output_path, model_name, num_completion=1, max_samples=None, output_fields=None,
+                 continue_from_error=False, temperature=0.8, top_p=0.95, max_tokens=2048, debug=False):
     """
     Read records from the input file, call the API for each record to generate instructive text, and write the results to the output file.
     
     Args:
         input_path (str): Input file path
         output_path (str): Output file path
-        recovery_file (str): Recovery file path, used to record unprocessed records for error recovery
         model_name (str): Model name. Please check the model list at https://help.aliyun.com/zh/model-studio/getting-started/models;
                           For DeepSeek API, the model name is "deepseek-chat" or "deepseek-reasoner".
         num_completion (int): Number of samples generated for each input, default is 1
@@ -55,13 +129,15 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
         temperature (float): Temperature parameter, controls diversity of generated text, default is 0.8
         top_p (float): Top-p parameter, controls diversity of generated text, default is 0.95
         max_tokens (int): Maximum length of generated text, default is 2048
-        save_every (int): Save output every n samples, default is 1000
-        random_seed (int): Random seed, default is None
         debug (bool): Whether to print debug information, default is False
     Returns:
         None
     """
 
+    if num_completion < 1:
+        raise ValueError("num_completion must be at least 1.")
+    if max_samples is not None and max_samples < 0:
+        raise ValueError("max_samples cannot be negative.")
     if model_name == "qwen3-32b":
         client = OpenAI(
             api_key=QWEN_API_KEY,
@@ -81,48 +157,81 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
     print(f"Model: {model_name}")
     print(f"Input path: {input_path}")
     print(f"Output path: {output_path}")
-    print(f"Recovery path: {recovery_file}")
     print(f"Continue from error: {continue_from_error}")
     print(f"Number of completions: {num_completion}, Max samples: {max_samples}," 
           f"Temperature: {temperature}, Top-p: {top_p}, Max tokens: {max_tokens}")
     
-    if continue_from_error:
-        # Read data from the temporary file
-        with open(recovery_file, 'r', encoding='utf-8') as temp_file:
-            selected_lines = temp_file.readlines()
-        
-    # Read the number of generated data lines from output_path
-        with open(output_path, 'r', encoding='utf-8') as outfile:
-            generated_lines = outfile.readlines()
-        
-        save_batch_counter = len(generated_lines)  # Start counting from the number of generated data lines
-        
+    if not continue_from_error and Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+        raise ValueError(
+            f"Output file is not empty: {output_path}. Use a new file or set "
+            "--continue_from_error."
+        )
+
+    # Read and validate all input records before calling the API.
+    with open(input_path, 'r', encoding='utf-8') as infile:
+        lines = infile.readlines()
+
+    records = []
+    prompt_ids = set()
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"Invalid JSON in {input_path} at line {line_number}: {error}"
+            ) from error
+        if not isinstance(record, dict):
+            raise ValueError(f"Input line {line_number} must contain a JSON object.")
+
+        prompt_id = record.get('prompt_id')
+        if (
+            isinstance(prompt_id, bool)
+            or not isinstance(prompt_id, int)
+            or prompt_id <= 0
+        ):
+            raise ValueError(
+                f"Input line {line_number} has no valid positive integer prompt_id. "
+                "Regenerate the prompt file with create_prompt.py."
+            )
+        if prompt_id in prompt_ids:
+            raise ValueError(f"Duplicate prompt_id in input: {prompt_id}")
+        prompt_ids.add(prompt_id)
+
+        user_content_list = record.get('user')
+        if isinstance(user_content_list, str):
+            user_content_list = [user_content_list]
+        if (
+            not isinstance(user_content_list, list)
+            or not user_content_list
+            or any(
+                not isinstance(content, str) or not content.strip()
+                for content in user_content_list
+            )
+        ):
+            raise ValueError(
+                f"Input prompt {prompt_id} must contain non-empty user messages."
+            )
+        records.append(record)
+
+    if max_samples is not None:
+        selected_records = records[:max_samples]
     else:
-    # Read all records
-        with open(input_path, 'r', encoding='utf-8') as infile:
-            lines = infile.readlines()
+        selected_records = records
 
-        if max_samples is not None:
-            # Randomly select m records
-            max_samples = min(len(lines), max_samples)  # Prevent exceeding file line count
-            random.seed(random_seed)  # Fix random seed, if None then not fixed
-            selected_lines = random.sample(lines, max_samples)
-        else:
-            selected_lines = lines  # Select all records
-
-    # Write selected_lines to temporary file for error recovery
-        with open(recovery_file, 'w', encoding='utf-8') as temp_file:
-            temp_file.writelines(selected_lines)
-
-        save_batch_counter = 0  # Counter for recording the number of generated samples
-
-    print(f"There have been {save_batch_counter} records saved to output file before.")
+    expected_task_ids = {
+        f"{record['prompt_id']}:{sample_index}"
+        for record in selected_records
+        for sample_index in range(1, num_completion + 1)
+    }
+    completed_task_ids = (
+        load_completed_task_ids(output_path, expected_task_ids, model_name)
+        if continue_from_error
+        else set()
+    )
+    print(f"There have been {len(completed_task_ids)} records saved to output file before.")
 
     with open(output_path, 'a', encoding='utf-8') as outfile:
-        remaining_lines = selected_lines.copy() # Make a copy to record remaining unprocessed samples for error recovery
-        for i, line in enumerate(selected_lines):
-            # Read system and user information from JSONL
-            record = json.loads(line)
+        for i, record in enumerate(selected_records):
             system_content = record.get('system', 'You are a helpful assistant.')
             user_content_list = record.get('user', '')
             if isinstance(user_content_list, str):
@@ -132,18 +241,18 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
             current_time = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
             print("\n")
             print(current_time)
-            print(f"Processing input sample {i + 1} of {len(selected_lines)}")
+            print(f"Processing input sample {i + 1} of {len(selected_records)}")
             if debug:
                 print(f"Input information:\nSystem: {system_content}\nUser: {user_content_list}")
-
-            # Check each entry in user_content_list, skip if any is empty
-            if any(not str(content).strip() for content in user_content_list):
-                print("\033[91mWarning: One or more user content entries are empty. Skipping this record.\033[0m")
-                continue
 
             # Call API
             api_busy = False  # Flag to indicate if API is busy
             for j in range(num_completion):
+                sample_index = j + 1
+                task_id = f"{record['prompt_id']}:{sample_index}"
+                if task_id in completed_task_ids:
+                    continue
+
                 input_messages = [{'role': 'system', 'content': system_content}]
                 llm_response = []  # Used to store LLM responses for each round
                 for round_k, user_input in enumerate(user_content_list):
@@ -196,7 +305,9 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
                     # Add each round response to output_data
                     output_data[f'response_{k + 1}'] = llm_response[k]
                 output_data['response'] = llm_response  # List of all round responses
-                output_data['sample_index'] = j + 1
+                output_data['sample_index'] = sample_index
+                output_data['task_id'] = task_id
+                output_data['model_name'] = model_name
 
                 # Prepare output result
                 if output_fields:
@@ -208,7 +319,14 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
                         print(f"\033[91mWarning: The following fields are missing in output_data: {missing_fields}\033[0m")
 
                     # Retain only the fields specified in output_fields, and re-rank them by the order in output_fields
-                    output_data = {key: output_data[key] for key in output_fields if key in output_data}
+                    filtered_output_data = {
+                        key: output_data[key]
+                        for key in output_fields
+                        if key in output_data
+                    }
+                    for key in ('prompt_id', 'sample_index', 'task_id', 'model_name'):
+                        filtered_output_data[key] = output_data[key]
+                    output_data = filtered_output_data
 
                 if debug:
                     print(f"All fields in output_data: {list(output_data.keys())}")
@@ -219,19 +337,19 @@ def api_infer(input_path, output_path, recovery_file, model_name, num_completion
                     
                 # Write result to output file
                 outfile.write(json.dumps(output_data, ensure_ascii=False) + '\n')
-                save_batch_counter += 1  # Increment counter for each generated record written
+                outfile.flush()
+                os.fsync(outfile.fileno())
+                completed_task_ids.add(task_id)
 
-                # Save file every save_every samples, and update temporary file
-                if save_batch_counter % save_every == 0:
-                    outfile.flush()
-                    print(f"Have saved {save_batch_counter} records to {output_path}")
-
-                    # Ensure remaining_lines are written to temporary file after saving generated data
-                    with open(recovery_file, 'w', encoding='utf-8') as temp_file:
-                        temp_file.writelines(remaining_lines)
-            
-            # Remove processed line from remaining_lines
-            remaining_lines.remove(line)
+    missing_task_ids = expected_task_ids - completed_task_ids
+    if missing_task_ids:
+        raise RuntimeError(
+            f"Generation finished with {len(missing_task_ids)} missing task IDs."
+        )
+    print(
+        f"Generation complete: total={len(expected_task_ids)}, "
+        f"completed={len(completed_task_ids)}, duplicates=0, missing=0."
+    )
 
 
 if __name__ == "__main__":
@@ -239,7 +357,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True, help="Input file containing structured prompts")
     parser.add_argument("--output_file", type=str, required=True, help="Output file to save generated instructions")
-    parser.add_argument("--recovery_file", type=str, required=True, help="File for recovering from error")
     parser.add_argument("--model_name", type=str, required=True, choices=["qwen3-32b", "deepseek-chat"],
                         help="Model name: 'qwen3-32b' or 'deepseek-chat'")
     parser.add_argument("--continue_from_error", action='store_true', help="Flag to continue from error")
@@ -248,8 +365,6 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=2048, help="Maximum number of tokens for generation")
     parser.add_argument("--num_completion", type=int, default=1, help="Number of completions to generate for each prompt")
     parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to process")
-    parser.add_argument("--save_every", type=int, default=20, help="Save output every n samples")
-    parser.add_argument("--random_seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode for verbose logging")
 
     args = parser.parse_args()
@@ -260,7 +375,6 @@ if __name__ == "__main__":
     api_infer(
         input_path=args.input_file,
         output_path=args.output_file,
-        recovery_file=args.recovery_file,
         continue_from_error=args.continue_from_error,
         model_name=model_name,
         temperature=args.temperature,
@@ -268,7 +382,5 @@ if __name__ == "__main__":
         max_tokens=args.max_tokens,
         num_completion=args.num_completion,
         max_samples=args.max_samples,
-        save_every=args.save_every,
-        random_seed=args.random_seed,
         debug=args.debug
     )
