@@ -212,7 +212,7 @@ if __name__ == "__main__":
             commit_input_path='data/commitpackft_python_cleaned.jsonl',
             oneshot_input_path='few-shot/1-shot-prompt_final_chose.jsonl',
             prompt_version='v5.2',
-            prompt_output_path='data/prompt_for_syn.jsonl',
+            prompt_output_path='data/prompt_for_syn_batch_infer.jsonl',
             min_snippet_lines=5,
             max_snippet_lines=15,
             sample_num=100000,
@@ -224,6 +224,6 @@ if __name__ == "__main__":
             commit_input_path='data/commitpackft_python_cleaned.jsonl',
             oneshot_input_path='few-shot/1-shot-prompt_final_chose.jsonl',
             prompt_version='v5.9',
-            prompt_output_path='data/prompt_rewrite_commit.jsonl',
+            prompt_output_path='data/prompt_rewrite_commit_batch_infer.jsonl',
             random_seed=42
         )
