@@ -215,7 +215,7 @@ if __name__ == "__main__":
             prompt_output_path='data/prompt_for_syn_batch_infer.jsonl',
             min_snippet_lines=5,
             max_snippet_lines=15,
-            sample_num=100000,
+            sample_num=30000,
             random_seed=42
         )
     elif args.prompt_type == 'rewrite_commit':
