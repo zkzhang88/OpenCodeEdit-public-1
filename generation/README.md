@@ -69,6 +69,28 @@ python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_fi
 
 During recovery, the script reconstructs all expected task IDs directly from the input file and skips IDs already present in the output file. The input file must remain unchanged between runs. Without `--continue_from_error`, the script refuses to append to a non-empty output file. Old prompt files without `prompt_id` must be regenerated with `create_prompt.py`, and old response files without `task_id` cannot be resumed.
 
+### Preparing the second round of batch inference
+
+After downloading the first-round SiliconFlow Batch Inference results, place
+the JSONL files in `data/prompt_for_syn_batch_infer_results/` and run:
+
+```bash
+python create_second_round_prompt_batch_infer.py
+```
+
+The script matches responses to the original requests by numeric `custom_id`,
+restores the original system and user messages, and appends the first-round
+assistant response followed by the v5.2 second-round user prompt. Result files
+and their records are ordered by `custom_id`, while each result file remains a
+separate batch. Outputs are written to
+`data/prompt_for_syn_batch_infer_round2/` as
+`prompt_for_syn_batch_infer_round2_partNNN.jsonl`.
+
+Use `--first-round-base-file`, `--results-dir`, and `--output-dir` to override
+the default locations. The converter stops without producing new batch files
+if it finds malformed IDs, conflicting duplicates, failed responses, missing
+original requests, or overlapping result-file ID ranges.
+
 
 ## Extracting Edit Triplets from Model Responses
 
