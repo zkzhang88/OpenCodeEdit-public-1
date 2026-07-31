@@ -1,6 +1,8 @@
 import json
 import random
 import difflib
+from pathlib import Path
+import re
 
 from prompts_for_gen import get_prompts
 
@@ -8,6 +10,68 @@ from prompts_for_gen import get_prompts
 BATCH_MODEL = "deepseek-ai/DeepSeek-V3"
 BATCH_URL = "/v1/chat/completions"
 BATCH_MAX_TOKENS = 2048
+MAX_BATCH_REQUESTS_PER_FILE = 6000
+
+
+class BatchJsonlWriter:
+    """Write batch requests to consecutively numbered JSONL parts."""
+
+    def __init__(self, output_path):
+        self.output_path = Path(output_path)
+        self.output_file = None
+        self.record_count = 0
+        self.part_number = 0
+
+    def __enter__(self):
+        self._clean_previous_outputs()
+        self._open_next_part()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.output_file is not None:
+            self.output_file.close()
+
+    def write(self, batch_request):
+        if (
+            self.record_count > 0
+            and self.record_count % MAX_BATCH_REQUESTS_PER_FILE == 0
+        ):
+            self.output_file.close()
+            self._open_next_part()
+
+        self.output_file.write(
+            json.dumps(batch_request, ensure_ascii=False) + "\n"
+        )
+        self.record_count += 1
+
+    def _part_path(self, part_number):
+        return self.output_path.with_name(
+            f"{self.output_path.stem}_part{part_number:03d}"
+            f"{self.output_path.suffix}"
+        )
+
+    def _open_next_part(self):
+        self.part_number += 1
+        self.output_file = open(
+            self._part_path(self.part_number),
+            "w",
+            encoding="utf-8",
+        )
+
+    def _clean_previous_outputs(self):
+        if self.output_path.is_file():
+            self.output_path.unlink()
+
+        part_name_pattern = re.compile(
+            rf"^{re.escape(self.output_path.stem)}_part\d+"
+            rf"{re.escape(self.output_path.suffix)}$"
+        )
+        glob_pattern = (
+            f"{self.output_path.stem}_part*{self.output_path.suffix}"
+        )
+        for candidate in self.output_path.parent.glob(glob_pattern):
+            if candidate.is_file() and part_name_pattern.fullmatch(candidate.name):
+                candidate.unlink()
 
 
 def build_batch_request(request_number, system_prompt, user_prompt):
@@ -38,7 +102,7 @@ def create_prompt(commit_input_path, oneshot_input_path, prompt_version, prompt_
         commit_input_path (str): Path to the JSONL file, each line representing a commit with keys 'commit', 'old_contents', 'new_contents', and 'message'.
         oneshot_input_path (str): Path to the one-shot input file containing example data.
         prompt_version (str): Version of the prompt template to use.
-        prompt_output_path (str): Path to the SiliconFlow Batch JSONL output file.
+        prompt_output_path (str): Base path used to name SiliconFlow Batch JSONL parts.
         sample_num (int, optional): Number of samples to generate in total. Defaults to 1.
         random_seed (int, optional): Seed for random number generator to ensure reproducibility. Defaults to None.
     Returns:
@@ -69,7 +133,7 @@ def create_prompt(commit_input_path, oneshot_input_path, prompt_version, prompt_
         snippet = '\n'.join(lines[start_line:start_line+snippet_length])
         return snippet
 
-    with open(prompt_output_path, 'w', encoding='utf-8') as output_file:
+    with BatchJsonlWriter(prompt_output_path) as output_writer:
     # Randomly sample code snippets from commit_input_path
         with open(commit_input_path, 'r', encoding='utf-8') as commit_file:
             commit_lines = commit_file.readlines()
@@ -126,7 +190,7 @@ def create_prompt(commit_input_path, oneshot_input_path, prompt_version, prompt_
                     user_prompt[0],
                 )
 
-                output_file.write(json.dumps(batch_request, ensure_ascii=False) + '\n')
+                output_writer.write(batch_request)
 
                 created_prompt_num += 1
 
@@ -192,10 +256,10 @@ def create_prompt_rewrite_commit(commit_input_path, oneshot_input_path, prompt_v
         random.shuffle(output_data)
 
     # Write to file
-    with open(prompt_output_path, 'w', encoding='utf-8') as output_file:
+    with BatchJsonlWriter(prompt_output_path) as output_writer:
         for prompt_id, item in enumerate(output_data, start=1):
             batch_request = build_batch_request(prompt_id, item[0], item[1])
-            output_file.write(json.dumps(batch_request, ensure_ascii=False) + '\n')
+            output_writer.write(batch_request)
 
     print(f"Total skipped records: {skipped_records}")  # Print total number of skipped records
 

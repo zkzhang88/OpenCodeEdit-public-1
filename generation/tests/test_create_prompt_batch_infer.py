@@ -8,6 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from generation.create_prompt_batch_infer import (
+    BatchJsonlWriter,
     create_prompt,
     create_prompt_rewrite_commit,
 )
@@ -40,6 +41,12 @@ class CreatePromptBatchInferTests(unittest.TestCase):
             for line in path.read_text(encoding="utf-8").splitlines()
         ]
 
+    @staticmethod
+    def part_path(output_file, part_number):
+        return output_file.with_name(
+            f"{output_file.stem}_part{part_number:03d}{output_file.suffix}"
+        )
+
     def assert_batch_request(self, record, request_number, user_content):
         self.assertEqual(
             set(record),
@@ -61,6 +68,7 @@ class CreatePromptBatchInferTests(unittest.TestCase):
             },
         )
 
+    @mock.patch("generation.create_prompt_batch_infer.MAX_BATCH_REQUESTS_PER_FILE", 2)
     @mock.patch("generation.create_prompt_batch_infer.get_prompts")
     def test_code_extension_writes_first_round_batch_requests(self, get_prompts):
         first_round = (
@@ -95,12 +103,18 @@ class CreatePromptBatchInferTests(unittest.TestCase):
             output_file,
             min_snippet_lines=2,
             max_snippet_lines=3,
-            sample_num=2,
+            sample_num=3,
             random_seed=42,
         )
 
-        records = self.read_jsonl(output_file)
-        self.assertEqual([record["custom_id"] for record in records], ["request-1", "request-2"])
+        part_one = self.read_jsonl(self.part_path(output_file, 1))
+        part_two = self.read_jsonl(self.part_path(output_file, 2))
+        records = part_one + part_two
+        self.assertEqual([len(part_one), len(part_two)], [2, 1])
+        self.assertEqual(
+            [record["custom_id"] for record in records],
+            ["request-1", "request-2", "request-3"],
+        )
         for request_number, record in enumerate(records, start=1):
             user_content = record["body"]["messages"][1]["content"]
             self.assert_batch_request(record, request_number, user_content)
@@ -108,6 +122,7 @@ class CreatePromptBatchInferTests(unittest.TestCase):
             self.assertNotIn("prompt_id", record)
             self.assertNotIn("commit", record)
 
+    @mock.patch("generation.create_prompt_batch_infer.MAX_BATCH_REQUESTS_PER_FILE", 2)
     @mock.patch("generation.create_prompt_batch_infer.get_prompts")
     def test_rewrite_writes_single_round_batch_requests(self, get_prompts):
         user_template = (
@@ -142,7 +157,8 @@ class CreatePromptBatchInferTests(unittest.TestCase):
             random_seed=42,
         )
 
-        records = self.read_jsonl(output_file)
+        records = self.read_jsonl(self.part_path(output_file, 1))
+        self.assertFalse(self.part_path(output_file, 2).exists())
         self.assertEqual([record["custom_id"] for record in records], ["request-1", "request-2"])
         for request_number, record in enumerate(records, start=1):
             user_content = record["body"]["messages"][1]["content"]
@@ -150,6 +166,41 @@ class CreatePromptBatchInferTests(unittest.TestCase):
             self.assertNotIn("prompt_id", record)
             self.assertNotIn("old_code", record)
             self.assertNotIn("new_code", record)
+
+    @mock.patch("generation.create_prompt_batch_infer.MAX_BATCH_REQUESTS_PER_FILE", 2)
+    def test_writer_creates_empty_part_and_cleans_previous_outputs(self):
+        output_file = self.root / "prompts.jsonl"
+        old_part_one = self.part_path(output_file, 1)
+        old_part_four = self.part_path(output_file, 4)
+        unrelated_file = self.root / "prompts_partABC.jsonl"
+        output_file.write_text("legacy\n", encoding="utf-8")
+        old_part_one.write_text("old one\n", encoding="utf-8")
+        old_part_four.write_text("old four\n", encoding="utf-8")
+        unrelated_file.write_text("keep\n", encoding="utf-8")
+
+        with BatchJsonlWriter(output_file):
+            pass
+
+        self.assertFalse(output_file.exists())
+        self.assertEqual(old_part_one.read_text(encoding="utf-8"), "")
+        self.assertFalse(old_part_four.exists())
+        self.assertTrue(unrelated_file.exists())
+
+    def test_writer_splits_6001_requests_into_6000_and_one(self):
+        output_file = self.root / "production_limit.jsonl"
+
+        with BatchJsonlWriter(output_file) as output_writer:
+            for request_number in range(1, 6002):
+                output_writer.write(
+                    {"custom_id": f"request-{request_number}"}
+                )
+
+        part_one = self.read_jsonl(self.part_path(output_file, 1))
+        part_two = self.read_jsonl(self.part_path(output_file, 2))
+        self.assertEqual([len(part_one), len(part_two)], [6000, 1])
+        self.assertEqual(part_one[-1]["custom_id"], "request-6000")
+        self.assertEqual(part_two[0]["custom_id"], "request-6001")
+        self.assertFalse(self.part_path(output_file, 3).exists())
 
 
 if __name__ == "__main__":
