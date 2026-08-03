@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import random
 import re
 import tempfile
 
@@ -20,6 +21,16 @@ else:
     )
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_COMMIT_INPUT_FILE = (
+    SCRIPT_DIR / "data" / "commitpackft_python_cleaned.jsonl"
+)
+DEFAULT_ONESHOT_INPUT_FILE = (
+    SCRIPT_DIR / "few-shot" / "1-shot-prompt_final_chose.jsonl"
+)
+DEFAULT_RANDOM_SEED = 42
+DEFAULT_MIN_SNIPPET_LINES = 5
+DEFAULT_MAX_SNIPPET_LINES = 15
 CUSTOM_ID_PATTERN = re.compile(r"^request-([1-9]\d*)$")
 CODE_SNIPPETS_PATTERN = re.compile(
     r"^## Code Snippet 1:\s*\n"
@@ -152,6 +163,131 @@ def load_second_round_requests(requests_dir):
     return requests
 
 
+def replay_prompt_metadata(
+    max_request_number,
+    commit_input_file=DEFAULT_COMMIT_INPUT_FILE,
+    oneshot_input_file=DEFAULT_ONESHOT_INPUT_FILE,
+    random_seed=DEFAULT_RANDOM_SEED,
+    min_snippet_lines=DEFAULT_MIN_SNIPPET_LINES,
+    max_snippet_lines=DEFAULT_MAX_SNIPPET_LINES,
+):
+    """Replay batch prompt sampling and return metadata indexed by request ID."""
+    if max_request_number < 1:
+        raise BatchResultError("max_request_number must be positive")
+    if min_snippet_lines < 1:
+        raise BatchResultError("min_snippet_lines must be positive")
+    if max_snippet_lines < min_snippet_lines:
+        raise BatchResultError(
+            "max_snippet_lines must be greater than or equal to "
+            "min_snippet_lines"
+        )
+
+    commit_input_file = Path(commit_input_file)
+    oneshot_input_file = Path(oneshot_input_file)
+    try:
+        with open(commit_input_file, "r", encoding="utf-8") as input_file:
+            commit_lines = input_file.readlines()
+    except OSError as error:
+        raise BatchResultError(
+            f"Cannot open commit input file {commit_input_file}: {error}"
+        ) from error
+    try:
+        with open(oneshot_input_file, "r", encoding="utf-8") as input_file:
+            oneshot_lines = input_file.readlines()
+    except OSError as error:
+        raise BatchResultError(
+            f"Cannot open few-shot input file {oneshot_input_file}: {error}"
+        ) from error
+
+    if len(commit_lines) < 2:
+        raise BatchResultError(
+            f"Commit input file must contain at least two records: {commit_input_file}"
+        )
+    if not oneshot_lines:
+        raise BatchResultError(
+            f"Few-shot input file is empty: {oneshot_input_file}"
+        )
+
+    rng = random.Random(random_seed)
+    metadata = {}
+    while len(metadata) < max_request_number:
+        selected_lines = rng.sample(commit_lines, 2)
+        try:
+            commit_records = [json.loads(line) for line in selected_lines]
+        except (json.JSONDecodeError, TypeError) as error:
+            raise BatchResultError(
+                f"Cannot replay prompts from {commit_input_file}: {error}"
+            ) from error
+
+        if any(
+            not record.get("old_contents", "")
+            or not record.get("new_contents", "")
+            or not record.get("commit", "")
+            for record in commit_records
+        ):
+            continue
+
+        code_snippets = []
+        try:
+            for record in commit_records:
+                code_lines = record["old_contents"].splitlines()
+                if len(code_lines) < min_snippet_lines:
+                    raise ValueError
+                snippet_length = rng.randint(
+                    min_snippet_lines,
+                    min(max_snippet_lines, len(code_lines)),
+                )
+                start_line = rng.randint(0, len(code_lines) - snippet_length)
+                code_snippets.append(
+                    "\n".join(
+                        code_lines[start_line : start_line + snippet_length]
+                    )
+                )
+        except ValueError:
+            continue
+
+        try:
+            json.loads(rng.choice(oneshot_lines))
+        except (json.JSONDecodeError, TypeError) as error:
+            raise BatchResultError(
+                f"Cannot replay prompts from {oneshot_input_file}: {error}"
+            ) from error
+
+        commits = [record["commit"] for record in commit_records]
+        if not all(isinstance(commit, str) and commit for commit in commits):
+            raise BatchResultError(
+                "Replayed commit metadata must contain two non-empty strings"
+            )
+        request_number = len(metadata) + 1
+        metadata[request_number] = {
+            "commit": commits,
+            "code_snippet": code_snippets,
+        }
+
+    return metadata
+
+
+def restore_request_commits(requests, replayed_metadata):
+    """Validate replayed snippets and attach commit lists to batch requests."""
+    for request_number, request in requests.items():
+        metadata = replayed_metadata.get(request_number)
+        custom_id = f"request-{request_number}"
+        if metadata is None:
+            raise BatchResultError(f"No replayed metadata found for {custom_id}")
+
+        actual_snippets = request.get("code_snippet")
+        expected_snippets = metadata["code_snippet"]
+        if not isinstance(actual_snippets, list) or [
+            snippet.strip() for snippet in actual_snippets
+        ] != [snippet.strip() for snippet in expected_snippets]:
+            raise BatchResultError(
+                f"Replayed code snippets do not match the request for {custom_id}; "
+                "check the commit input, few-shot input, sampling limits, and seed"
+            )
+
+        request["commit"] = list(metadata["commit"])
+
+
 def extract_response_2(record, context):
     custom_id = record.get("custom_id")
     request_number = parse_custom_id(custom_id, context)
@@ -238,13 +374,31 @@ def write_ordered_responses(requests, results, output_file):
             merged_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def extract_batch_instruct(results_dir, output_file, requests_dir=None):
+def extract_batch_instruct(
+    results_dir,
+    output_file,
+    requests_dir=None,
+    commit_input_file=DEFAULT_COMMIT_INPUT_FILE,
+    oneshot_input_file=DEFAULT_ONESHOT_INPUT_FILE,
+    random_seed=DEFAULT_RANDOM_SEED,
+    min_snippet_lines=DEFAULT_MIN_SNIPPET_LINES,
+    max_snippet_lines=DEFAULT_MAX_SNIPPET_LINES,
+):
     results_dir = Path(results_dir)
     output_file = Path(output_file)
     if requests_dir is None:
         requests_dir = infer_requests_dir(results_dir)
 
     requests = load_second_round_requests(requests_dir)
+    replayed_metadata = replay_prompt_metadata(
+        max(requests),
+        commit_input_file=commit_input_file,
+        oneshot_input_file=oneshot_input_file,
+        random_seed=random_seed,
+        min_snippet_lines=min_snippet_lines,
+        max_snippet_lines=max_snippet_lines,
+    )
+    restore_request_commits(requests, replayed_metadata)
     results = load_batch_results(results_dir)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -303,6 +457,42 @@ def build_argument_parser():
             "(default: results directory name with trailing '_results' removed)"
         ),
     )
+    parser.add_argument(
+        "--commit-input-file",
+        type=Path,
+        default=DEFAULT_COMMIT_INPUT_FILE,
+        help=f"Source commit JSONL file (default: {DEFAULT_COMMIT_INPUT_FILE})",
+    )
+    parser.add_argument(
+        "--oneshot-input-file",
+        type=Path,
+        default=DEFAULT_ONESHOT_INPUT_FILE,
+        help=f"Few-shot JSONL file (default: {DEFAULT_ONESHOT_INPUT_FILE})",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help=f"Prompt sampling seed (default: {DEFAULT_RANDOM_SEED})",
+    )
+    parser.add_argument(
+        "--min-snippet-lines",
+        type=int,
+        default=DEFAULT_MIN_SNIPPET_LINES,
+        help=(
+            "Minimum sampled code snippet length "
+            f"(default: {DEFAULT_MIN_SNIPPET_LINES})"
+        ),
+    )
+    parser.add_argument(
+        "--max-snippet-lines",
+        type=int,
+        default=DEFAULT_MAX_SNIPPET_LINES,
+        help=(
+            "Maximum sampled code snippet length "
+            f"(default: {DEFAULT_MAX_SNIPPET_LINES})"
+        ),
+    )
     return parser
 
 
@@ -312,6 +502,11 @@ def main():
         args.results_dir,
         args.output_file,
         requests_dir=args.requests_dir,
+        commit_input_file=args.commit_input_file,
+        oneshot_input_file=args.oneshot_input_file,
+        random_seed=args.random_seed,
+        min_snippet_lines=args.min_snippet_lines,
+        max_snippet_lines=args.max_snippet_lines,
     )
     print(
         f"Processed {result_count} batch results in custom_id order. "
