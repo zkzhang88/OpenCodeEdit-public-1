@@ -11,7 +11,7 @@ else:
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_FIRST_ROUND_BASE_FILE = (
+DEFAULT_FIRST_ROUND_INPUT = (
     SCRIPT_DIR / "data" / "prompt_for_syn_batch_infer.jsonl"
 )
 DEFAULT_RESULTS_DIR = (
@@ -69,26 +69,31 @@ def read_jsonl(path):
             yield line_number, record
 
 
-def discover_first_round_files(first_round_base_file):
-    """Find first-round part files, including retry suffixes such as ``_1``."""
-    base_path = Path(first_round_base_file)
-    part_pattern = re.compile(
-        rf"^{re.escape(base_path.stem)}_part\d+(?:_\d+)?"
-        rf"{re.escape(base_path.suffix)}$"
-    )
-    candidates = [
-        path
-        for path in base_path.parent.glob(
-            f"{base_path.stem}_part*{base_path.suffix}"
-        )
-        if path.is_file() and part_pattern.fullmatch(path.name)
-    ]
-    if not candidates:
+def discover_first_round_files(first_round_input):
+    """Find first-round request JSONL files from a directory or one file."""
+    first_round_path = Path(first_round_input)
+    if first_round_path.is_file():
+        if first_round_path.suffix != ".jsonl":
+            raise BatchConversionError(
+                "First-round request file must have a .jsonl suffix: "
+                f"{first_round_path}"
+            )
+        return [first_round_path]
+
+    if not first_round_path.is_dir():
         raise BatchConversionError(
-            "No first-round batch files found for "
-            f"{base_path.parent / (base_path.stem + '_part*' + base_path.suffix)}"
+            "First-round request path does not exist or is not a directory or "
+            f"file: {first_round_path}"
         )
-    return sorted(candidates)
+
+    request_files = sorted(
+        path for path in first_round_path.glob("*.jsonl") if path.is_file()
+    )
+    if not request_files:
+        raise BatchConversionError(
+            f"No JSONL first-round request files found in {first_round_path}"
+        )
+    return request_files
 
 
 def validate_first_round_request(record, context):
@@ -131,12 +136,12 @@ def validate_first_round_request(record, context):
     return request_number, custom_id
 
 
-def load_first_round_requests(first_round_base_file):
+def load_first_round_requests(first_round_input):
     """Index first-round requests by numeric custom ID."""
     requests_by_number = {}
     source_by_number = {}
 
-    for path in discover_first_round_files(first_round_base_file):
+    for path in discover_first_round_files(first_round_input):
         for line_number, record in read_jsonl(path):
             context = f"{path}:{line_number}"
             request_number, custom_id = validate_first_round_request(
@@ -378,13 +383,13 @@ def write_output_batches(
 
 
 def create_second_round_batches(
-    first_round_base_file=DEFAULT_FIRST_ROUND_BASE_FILE,
+    first_round_input=DEFAULT_FIRST_ROUND_INPUT,
     results_dir=DEFAULT_RESULTS_DIR,
     output_dir=DEFAULT_OUTPUT_DIR,
 ):
     """Convert first-round batch responses into v5.2 second-round requests."""
     result_batches = load_result_batches(results_dir)
-    first_round_requests = load_first_round_requests(first_round_base_file)
+    first_round_requests = load_first_round_requests(first_round_input)
 
     missing_custom_ids = [
         custom_id
@@ -422,12 +427,13 @@ def build_argument_parser():
         )
     )
     parser.add_argument(
-        "--first-round-base-file",
+        "--first-round-input",
         type=Path,
-        default=DEFAULT_FIRST_ROUND_BASE_FILE,
+        default=DEFAULT_FIRST_ROUND_INPUT,
         help=(
-            "Base first-round path used to discover <stem>_part*.jsonl "
-            f"(default: {DEFAULT_FIRST_ROUND_BASE_FILE})"
+            "Directory containing first-round request JSONL files, or one "
+            "first-round request JSONL file "
+            f"(default: {DEFAULT_FIRST_ROUND_INPUT})"
         ),
     )
     parser.add_argument(
@@ -451,7 +457,7 @@ def build_argument_parser():
 def main():
     args = build_argument_parser().parse_args()
     summaries = create_second_round_batches(
-        first_round_base_file=args.first_round_base_file,
+        first_round_input=args.first_round_input,
         results_dir=args.results_dir,
         output_dir=args.output_dir,
     )

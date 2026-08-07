@@ -86,11 +86,12 @@ separate batch. Outputs are written to
 `data/prompt_for_syn_batch_infer_round2/` as
 `prompt_for_syn_batch_infer_round2_partNNN.jsonl`.
 
-Use `--first-round-base-file`, `--results-dir`, and `--output-dir` to override
-the default locations. `--results-dir` accepts either a directory of result
-JSONL files or one result JSONL file. The converter stops without producing
-new batch files if it finds malformed IDs, conflicting duplicates, failed
-responses, missing original requests, or overlapping result-file ID ranges.
+Use `--first-round-input`, `--results-dir`, and `--output-dir` to override
+the default locations. `--first-round-input` and `--results-dir` each
+accept either a directory of JSONL files or one JSONL file. The converter stops
+without producing new batch files if it finds malformed IDs, conflicting
+duplicates, failed responses, missing original requests, or overlapping
+result-file ID ranges.
 
 
 ## Extracting Edit Triplets from Model Responses

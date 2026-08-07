@@ -14,7 +14,7 @@ class CreateSecondRoundPromptBatchInferTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
-        self.first_round_base = self.root / "prompts.jsonl"
+        self.first_round_input = self.root
         self.results_dir = self.root / "results"
         self.output_dir = self.root / "round2"
         self.results_dir.mkdir()
@@ -90,7 +90,7 @@ class CreateSecondRoundPromptBatchInferTests(unittest.TestCase):
             return_value=("system", ["round one", "round two"]),
         ):
             return converter.create_second_round_batches(
-                first_round_base_file=self.first_round_base,
+                first_round_input=self.first_round_input,
                 results_dir=self.results_dir,
                 output_dir=self.output_dir,
             )
@@ -201,7 +201,7 @@ class CreateSecondRoundPromptBatchInferTests(unittest.TestCase):
             self.first_round_part("001"),
             [self.make_request(1)],
         )
-        result_file = self.root / "batch.jsonl"
+        result_file = self.results_dir / "batch.jsonl"
         self.write_jsonl(result_file, [self.make_result(1)])
 
         with mock.patch.object(
@@ -210,7 +210,7 @@ class CreateSecondRoundPromptBatchInferTests(unittest.TestCase):
             return_value=("system", ["round one", "round two"]),
         ):
             summaries = converter.create_second_round_batches(
-                first_round_base_file=self.first_round_base,
+                first_round_input=self.first_round_input,
                 results_dir=result_file,
                 output_dir=self.output_dir,
             )
@@ -221,6 +221,28 @@ class CreateSecondRoundPromptBatchInferTests(unittest.TestCase):
             self.read_jsonl(summaries[0]["path"])[0]["custom_id"],
             "request-1",
         )
+
+    def test_accepts_a_single_first_round_request_file(self):
+        first_round_file = self.root / "request.jsonl"
+        self.write_jsonl(first_round_file, [self.make_request(1)])
+        self.write_jsonl(
+            self.results_dir / "batch.jsonl",
+            [self.make_result(1)],
+        )
+
+        with mock.patch.object(
+            converter,
+            "get_prompts",
+            return_value=("system", ["round one", "round two"]),
+        ):
+            summaries = converter.create_second_round_batches(
+                first_round_input=first_round_file,
+                results_dir=self.results_dir,
+                output_dir=self.output_dir,
+            )
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["count"], 1)
 
     def test_rejects_conflicting_duplicate_first_round_request(self):
         self.write_jsonl(
