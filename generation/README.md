@@ -222,6 +222,50 @@ are written below type-named directories such as
 `ocedataft_quality_filtered_samples/ds_descriptive/line_NNNNNN/`.
 
 
+## LLM Semantic Quality Check
+
+After the static quality check, run the semantic checker on its filtered JSONL:
+
+```bash
+python3 generation/semantic_check_api.py \
+  --input-file data/OCEData/ocedata_quality_filtered.jsonl \
+  --model-name qwen3-32b
+```
+
+Use `--model-name deepseek-v3` to check with the configured DeepSeek model.
+The selected model checks every input record, regardless of its `instr_type`.
+API endpoints, keys, and actual provider model names come from
+`generation/api_config.yaml`. The fixed prompts are defined in
+`generation/prompts_for_check.py`; every record is sent in a fresh system/user
+context with no generation history.
+
+The default outputs are created beside the input:
+
+- `<input_stem>_semantic_results.jsonl`: one current result per input line;
+- `<input_stem>_semantic_filtered.jsonl`: original records whose three verdicts
+  are all `PASS`;
+- `<input_stem>_semantic_summary.yaml`: decision, verdict, and token counts;
+- result state and progress JSON files used for safe recovery.
+
+`FAIL`, `UNCERTAIN`, and `ERROR` records are excluded from the filtered output.
+API errors and malformed model responses are retried and then recorded as
+`ERROR` without stopping the remaining work. Resume an interrupted run, or
+retry its `ERROR` records, with the same arguments plus:
+
+```bash
+python3 generation/semantic_check_api.py \
+  --input-file data/OCEData/ocedata_quality_filtered.jsonl \
+  --model-name qwen3-32b \
+  --continue-from-error
+```
+
+Use `--workers` to opt into concurrent requests. Output paths and input field
+names can be overridden with `--result-file`, `--filtered-file`,
+`--summary-file`, `--pre-field`, `--post-field`, and `--instruction-field`.
+Use distinct output paths when checking the same input independently with both
+models.
+
+
 ## Finetune dataset construction
 After data mixing and filtering, you can run `generate_finetune_dataset.py` to construct a formatted dataset for downstream finetuning:
 ```bash
