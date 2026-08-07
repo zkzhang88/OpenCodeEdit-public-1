@@ -196,6 +196,32 @@ class CreateSecondRoundPromptBatchInferTests(unittest.TestCase):
         self.assertEqual(part_one[0]["custom_id"], "request-2")
         self.assertEqual(part_two[0]["custom_id"], "request-100")
 
+    def test_accepts_a_single_result_file(self):
+        self.write_jsonl(
+            self.first_round_part("001"),
+            [self.make_request(1)],
+        )
+        result_file = self.root / "batch.jsonl"
+        self.write_jsonl(result_file, [self.make_result(1)])
+
+        with mock.patch.object(
+            converter,
+            "get_prompts",
+            return_value=("system", ["round one", "round two"]),
+        ):
+            summaries = converter.create_second_round_batches(
+                first_round_base_file=self.first_round_base,
+                results_dir=result_file,
+                output_dir=self.output_dir,
+            )
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["count"], 1)
+        self.assertEqual(
+            self.read_jsonl(summaries[0]["path"])[0]["custom_id"],
+            "request-1",
+        )
+
     def test_rejects_conflicting_duplicate_first_round_request(self):
         self.write_jsonl(
             self.first_round_part("001"),

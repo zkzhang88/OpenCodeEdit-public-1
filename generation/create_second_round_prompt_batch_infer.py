@@ -159,11 +159,19 @@ def load_first_round_requests(first_round_base_file):
 
 
 def discover_result_files(results_dir):
-    """Find first-round result JSONL files."""
+    """Find first-round result JSONL files from a directory or one file."""
     results_path = Path(results_dir)
+    if results_path.is_file():
+        if results_path.suffix != ".jsonl":
+            raise BatchConversionError(
+                f"Result file must have a .jsonl suffix: {results_path}"
+            )
+        return [results_path]
+
     if not results_path.is_dir():
         raise BatchConversionError(
-            f"Results directory does not exist: {results_path}"
+            f"Results path does not exist or is not a directory or file: "
+            f"{results_path}"
         )
     result_files = sorted(
         path for path in results_path.glob("*.jsonl") if path.is_file()
@@ -427,7 +435,7 @@ def build_argument_parser():
         type=Path,
         default=DEFAULT_RESULTS_DIR,
         help=(
-            "Directory containing result JSONL files "
+            "Directory containing result JSONL files, or one result JSONL file "
             f"(default: {DEFAULT_RESULTS_DIR})"
         ),
     )
