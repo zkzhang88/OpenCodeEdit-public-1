@@ -37,61 +37,90 @@ This command uses the `v5.2` two-round code-editing prompt and creates a jsonl f
 
 The prompt templates can be found in `prompts_for_gen.py`
 
-`code_generation_api.py` calls API from [DeepSeek](https://platform.deepseek.com/) or [Aliyun](https://help.aliyun.com/zh/model-studio/models), so please apply for the API keys from the websites. Copy the tracked template to the ignored local configuration file, then fill in the API keys, base URLs, and actual API model names:
+The unified inference pipeline supports direct OpenAI-compatible APIs,
+SiliconFlow Batch Inference, and the local `batch-infer` command installed in
+the `llm_infer` Conda environment. Copy both local configuration templates:
 
 ```bash
 cp api_config.example.yaml api_config.yaml
+cp inference_config.example.yaml inference_config.yaml
 ```
 
-The local `api_config.yaml` should contain:
+Fill API credentials in the ignored `api_config.yaml`. Model names, local model
+paths, sampling settings, GPU selection, and executor options belong in the
+ignored `inference_config.yaml`; see the tracked example for every supported
+field. Credentials are loaded only for the selected executor and are never
+written to a run manifest.
 
-```yaml
-QWEN_API_KEY: "sk-xxxx"
-QWEN_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-QWEN_API_MODEL_NAME: "qwen3-32b"
-DEEPSEEK_API_KEY: "sk-xxxx"
-DEEPSEEK_BASE_URL: "https://api.deepseek.com"
-DEEPSEEK_API_MODEL_NAME: "deepseek-chat"
-```
-
-Then, use Qwen3 to generate data by running:
-```bash
-python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_file data/generated_instr_qwen3.jsonl --model_name qwen3-32b
-```
-
-You can use DeepSeek for generation by setting `--model_name deepseek-v3`. The script automatically selects the DeepSeek API key, base URL, and `DEEPSEEK_API_MODEL_NAME`; remember to change the `--output_file` to another name!
-
-The generation process may take several hours or even several days to finish. Every API task is identified by `<prompt_id>:<sample_index>`, and each completed output record is immediately flushed and synced to disk. When `--max_samples` is set, the script processes the first `max_samples` input records in file order. To resume an interrupted run, use the same input, output, model, and sampling arguments, then add `--continue_from_error`:
+Run direct API inference from the repository root:
 
 ```bash
-python code_generation_api.py --input_file data/prompt_for_syn.jsonl --output_file data/generated_instr_qwen3.jsonl --model_name qwen3-32b --continue_from_error
+python generation/inference.py run \
+  --executor api \
+  --model qwen3-32b \
+  --config generation/inference_config.yaml \
+  --input generation/data/prompt_for_syn.jsonl \
+  --output generation/data/generated_instr_qwen3.jsonl \
+  --run-dir generation/data/runs/qwen3_api
 ```
 
-During recovery, the script reconstructs all expected task IDs directly from the input file and skips IDs already present in the output file. The input file must remain unchanged between runs. Without `--continue_from_error`, the script refuses to append to a non-empty output file. Old prompt files without `prompt_id` must be regenerated with `create_prompt.py`, and old response files without `task_id` cannot be resumed.
-
-### Preparing the second round of batch inference
-
-After downloading the first-round SiliconFlow Batch Inference results, place
-the JSONL files in `data/prompt_for_syn_batch_infer_results/` and run:
+For SiliconFlow, `run` uploads and submits the first round, records every file
+and job ID in the run manifest, and then exits by default:
 
 ```bash
-python create_second_round_prompt_batch_infer.py
+python generation/inference.py run \
+  --executor siliconflow-batch \
+  --model deepseek-v3 \
+  --config generation/inference_config.yaml \
+  --input generation/data/prompt_for_syn.jsonl \
+  --output generation/data/generated_instr_siliconflow.jsonl \
+  --run-dir generation/data/runs/siliconflow_deepseek
 ```
 
-The script matches responses to the original requests by numeric `custom_id`,
-restores the original system and user messages, and appends the first-round
-assistant response followed by the v5.2 second-round user prompt. Result files
-and their records are ordered by `custom_id`, while each result file remains a
-separate batch. Outputs are written to
-`data/prompt_for_syn_batch_infer_round2/` as
-`prompt_for_syn_batch_infer_round2_partNNN.jsonl`.
+Resume it with waiting enabled to collect round one, submit and collect round
+two, and write the final output:
 
-Use `--first-round-input`, `--results-dir`, and `--output-dir` to override
-the default locations. `--first-round-input` and `--results-dir` each
-accept either a directory of JSONL files or one JSONL file. The converter stops
-without producing new batch files if it finds malformed IDs, conflicting
-duplicates, failed responses, missing original requests, or overlapping
-result-file ID ranges.
+```bash
+python generation/inference.py resume \
+  --run-dir generation/data/runs/siliconflow_deepseek \
+  --wait
+```
+
+Add `--wait` to the initial `run` command to block through both remote rounds.
+Without `--wait`, `resume` checks the current jobs once, advances any immediately
+available stage, and exits.
+
+For local vLLM inference, configure the model path and GPU settings in the
+`local-qwen3` profile and run:
+
+```bash
+python generation/inference.py run \
+  --executor llm-infer \
+  --model local-qwen3 \
+  --config generation/inference_config.yaml \
+  --input generation/data/prompt_for_syn.jsonl \
+  --output generation/data/generated_instr_local.jsonl \
+  --run-dir generation/data/runs/local_qwen3
+```
+
+By default this invokes `conda run --no-capture-output -n llm_infer
+batch-infer batch --auto-serve` once per conversation round. Set
+`auto_serve: false` and `base_url` in the profile to reuse an existing service.
+
+Every task is identified by `<prompt_id>:<sample_index>`. Per-round results are
+flushed under the run directory, while the explicitly selected final output is
+created atomically only after every task completes every round. Inspect a run
+without changing it with:
+
+```bash
+python generation/inference.py status --run-dir generation/data/runs/local_qwen3
+```
+
+Failed or missing Batch requests are retried without rerunning successful tasks.
+After the configured attempt budget is exhausted, the run remains `incomplete`
+and no final output is created. After correcting the external problem, use
+`resume --retry-failed` to grant the incomplete round a fresh retry budget. The
+original prompt file must not change during a resumable run.
 
 
 ## Extracting Edit Triplets from Model Responses

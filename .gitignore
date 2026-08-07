@@ -181,3 +181,6 @@ data/
 
 # Local API credentials
 generation/api_config.yaml
+
+# Machine-specific inference profiles
+generation/inference_config.yaml
