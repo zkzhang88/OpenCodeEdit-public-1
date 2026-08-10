@@ -6,10 +6,22 @@ import subprocess
 import time
 from typing import Any, Callable
 
-from .batch import build_batch_request, parse_batch_output, write_batch_inputs
+from .batch import (
+    build_batch_request,
+    inspect_batch_output,
+    parse_batch_output,
+    write_batch_inputs,
+)
 from .config import load_credentials
-from .io import InferenceError, append_jsonl, load_yaml, read_jsonl
-from .schema import custom_id, parse_custom_id, round_messages
+from .io import (
+    InferenceError,
+    append_jsonl,
+    atomic_write_jsonl,
+    load_yaml,
+    read_jsonl,
+    repair_incomplete_jsonl_tail,
+)
+from .schema import parse_custom_id, round_messages
 
 
 def _value(value: Any, name: str, default: Any = None) -> Any:
@@ -74,68 +86,200 @@ class RealtimeApiExecutor:
             pending = [task for task in tasks if task["task_id"] not in completed]
             if not pending:
                 round_state["status"] = "complete"
+                active = round_state.get("active_attempt")
+                if active is not None:
+                    round_state["last_resume_count"] = active["resume_count"]
+                    round_state["last_exit_code"] = 0
+                    round_state.pop("last_error", None)
+                round_state.pop("active_attempt", None)
                 save_manifest()
                 return "complete"
-            if round_state["attempts_used"] >= round_state["attempt_limit"]:
-                round_state["status"] = "incomplete"
+
+            active = round_state.get("active_attempt")
+            if active is None:
+                if round_state["attempts_used"] >= round_state["attempt_limit"]:
+                    round_state["status"] = "incomplete"
+                    save_manifest()
+                    return "incomplete"
+                round_state["attempts_used"] += 1
+                attempt = round_state["attempts_used"]
+                directory = Path(round_state["directory"])
+                input_path = directory / f"attempt_{attempt:03d}_input.jsonl"
+                output_path = directory / f"attempt_{attempt:03d}_output.jsonl"
+                atomic_write_jsonl(
+                    input_path,
+                    [
+                        {
+                            "task_id": task["task_id"],
+                            "round": round_state["round"],
+                            "model": config["executor_config"]["model"],
+                            "messages": round_messages(
+                                task,
+                                round_state["round"],
+                                prior_by_task[task["task_id"]],
+                            ),
+                            "sampling": config["sampling"],
+                            "extra_body": config["executor_config"].get(
+                                "extra_body", {}
+                            ),
+                        }
+                        for task in pending
+                    ],
+                )
+                active = {
+                    "attempt": attempt,
+                    "input_path": str(input_path),
+                    "output_path": str(output_path),
+                    "expected_task_ids": [task["task_id"] for task in pending],
+                    "invocations": 0,
+                    "resume_count": 0,
+                }
+                round_state["active_attempt"] = active
+                round_state["status"] = "running"
                 save_manifest()
-                return "incomplete"
 
-            round_state["attempts_used"] += 1
-            attempt = round_state["attempts_used"]
-            attempt_path = Path(round_state["directory"]) / f"attempt_{attempt:03d}_output.jsonl"
-            round_state["status"] = "running"
-            save_manifest()
-
-            api_key, base_url = load_credentials(config)
-            if self.client_factory is None:
-                from openai import OpenAI
-
-                client_factory = OpenAI
-            else:
-                client_factory = self.client_factory
-            client = client_factory(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=config["executor_config"].get("request_timeout", 600),
-                max_retries=config["executor_config"].get("request_retries", 5),
+            expected_ids = set(active["expected_task_ids"])
+            records = self._load_attempt_records(
+                active["output_path"], expected_ids, round_state["round"]
             )
-            successes: list[dict[str, Any]] = []
-            for task in pending:
-                try:
-                    completion = client.chat.completions.create(
-                        model=config["executor_config"]["model"],
-                        messages=round_messages(
-                            task, round_state["round"], prior_by_task[task["task_id"]]
-                        ),
-                        **config["sampling"],
-                        extra_body=config["executor_config"].get("extra_body", {}),
+            self._merge_api_successes(results_path, records)
+            missing_ids = expected_ids - records.keys()
+            if not missing_ids:
+                round_state["last_failures"] = {
+                    task_id: record["error"]
+                    for task_id, record in records.items()
+                    if record["status"] == "error"
+                }
+                round_state["last_exit_code"] = 0
+                round_state["last_resume_count"] = active["resume_count"]
+                round_state.pop("last_error", None)
+                round_state.pop("active_attempt", None)
+                round_state["status"] = "running"
+                save_manifest()
+                continue
+
+            active["invocations"] += 1
+            active["resume_count"] = active["invocations"] - 1
+            round_state["status"] = "running"
+            round_state.pop("last_error", None)
+            save_manifest()
+            task_by_id = {task["task_id"]: task for task in tasks}
+            attempt_path = Path(active["output_path"])
+            try:
+                api_key, base_url = load_credentials(config)
+                if self.client_factory is None:
+                    from openai import OpenAI
+
+                    client_factory = OpenAI
+                else:
+                    client_factory = self.client_factory
+                client = client_factory(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=config["executor_config"].get("request_timeout", 600),
+                    max_retries=config["executor_config"].get("request_retries", 5),
+                )
+                for task_id in active["expected_task_ids"]:
+                    if task_id not in missing_ids:
+                        continue
+                    task = task_by_id[task_id]
+                    try:
+                        completion = client.chat.completions.create(
+                            model=config["executor_config"]["model"],
+                            messages=round_messages(
+                                task, round_state["round"], prior_by_task[task_id]
+                            ),
+                            **config["sampling"],
+                            extra_body=config["executor_config"].get(
+                                "extra_body", {}
+                            ),
+                        )
+                        content = completion.choices[0].message.content
+                        if not isinstance(content, str) or not content.strip():
+                            raise InferenceError(
+                                "response has no non-empty assistant content"
+                            )
+                        raw_response = (
+                            completion.model_dump(mode="json")
+                            if hasattr(completion, "model_dump")
+                            else None
+                        )
+                        attempt_record = {
+                            "task_id": task_id,
+                            "round": round_state["round"],
+                            "status": "success",
+                            "content": content,
+                            "raw_response": raw_response,
+                        }
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as error:  # one task must not discard the attempt
+                        attempt_record = {
+                            "task_id": task_id,
+                            "round": round_state["round"],
+                            "status": "error",
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    append_jsonl(attempt_path, attempt_record)
+                    if attempt_record["status"] == "success":
+                        self._merge_api_successes(
+                            results_path, {task_id: attempt_record}
+                        )
+            except KeyboardInterrupt:
+                round_state["status"] = "interrupted"
+                round_state["last_exit_code"] = 130
+                save_manifest()
+                return "interrupted"
+            except Exception as error:
+                round_state["status"] = "interrupted"
+                round_state["last_exit_code"] = 1
+                round_state["last_error"] = f"{type(error).__name__}: {error}"
+                save_manifest()
+                return "interrupted"
+
+    @staticmethod
+    def _load_attempt_records(
+        path: str | Path, expected_ids: set[str], round_index: int
+    ) -> dict[str, dict[str, Any]]:
+        path = Path(path)
+        if not path.exists():
+            return {}
+        records: dict[str, dict[str, Any]] = {}
+        for record in read_jsonl(path):
+            task_id = record.get("task_id")
+            if task_id not in expected_ids:
+                raise InferenceError(f"Unexpected API attempt task_id: {task_id!r}")
+            if task_id in records:
+                raise InferenceError(f"Duplicate API attempt task_id: {task_id}")
+            if record.get("round") != round_index:
+                raise InferenceError(
+                    f"API attempt task {task_id} belongs to a different round"
+                )
+            if record.get("status") not in {"success", "error"}:
+                raise InferenceError(f"Invalid API attempt status for task {task_id}")
+            if record["status"] == "success":
+                content = record.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise InferenceError(
+                        f"API attempt task {task_id} has invalid content"
                     )
-                    content = completion.choices[0].message.content
-                    if not isinstance(content, str) or not content.strip():
-                        raise InferenceError("response has no non-empty assistant content")
-                    raw_response = (
-                        completion.model_dump(mode="json")
-                        if hasattr(completion, "model_dump")
-                        else None
-                    )
-                    attempt_record = {
-                        "task_id": task["task_id"],
-                        "round": round_state["round"],
-                        "status": "success",
-                        "content": content,
-                        "raw_response": raw_response,
-                    }
-                    successes.append({key: value for key, value in attempt_record.items() if key != "status"})
-                except Exception as error:  # one failed task must not discard the batch
-                    attempt_record = {
-                        "task_id": task["task_id"],
-                        "round": round_state["round"],
-                        "status": "error",
-                        "error": f"{type(error).__name__}: {error}",
-                    }
-                append_jsonl(attempt_path, attempt_record)
-            save_successes(results_path, successes)
+            elif not isinstance(record.get("error"), str):
+                raise InferenceError(f"API attempt task {task_id} has invalid error")
+            records[task_id] = record
+        return records
+
+    @staticmethod
+    def _merge_api_successes(
+        results_path: Path, records: dict[str, dict[str, Any]]
+    ) -> None:
+        save_successes(
+            results_path,
+            [
+                {key: value for key, value in record.items() if key != "status"}
+                for record in records.values()
+                if record["status"] == "success"
+            ],
+        )
 
 
 class LlmInferBatchExecutor:
@@ -144,7 +288,12 @@ class LlmInferBatchExecutor:
 
     @staticmethod
     def build_command(
-        config: dict[str, Any], input_path: Path, output_path: Path, log_path: Path
+        config: dict[str, Any],
+        input_path: Path,
+        output_path: Path,
+        log_path: Path,
+        *,
+        resume: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
         executor_config = config["executor_config"]
         command = [
@@ -175,7 +324,7 @@ class LlmInferBatchExecutor:
             str(executor_config.get("gpu_memory_utilization", 0.9)),
             "--server-log",
             str(log_path),
-            "--no-resume",
+            "--resume" if resume else "--no-resume",
         ]
         if executor_config.get("auto_serve", True):
             command.append("--auto-serve")
@@ -222,34 +371,84 @@ class LlmInferBatchExecutor:
             pending = [task for task in tasks if task["task_id"] not in completed]
             if not pending:
                 round_state["status"] = "complete"
+                round_state.pop("active_attempt", None)
                 save_manifest()
                 return "complete"
-            if round_state["attempts_used"] >= round_state["attempt_limit"]:
-                round_state["status"] = "incomplete"
-                save_manifest()
-                return "incomplete"
 
-            round_state["attempts_used"] += 1
-            attempt = round_state["attempts_used"]
+            active = round_state.get("active_attempt")
+            if active is None:
+                if round_state["attempts_used"] >= round_state["attempt_limit"]:
+                    round_state["status"] = "incomplete"
+                    save_manifest()
+                    return "incomplete"
+                round_state["attempts_used"] += 1
+                attempt = round_state["attempts_used"]
+                directory = Path(round_state["directory"])
+                input_path = directory / f"attempt_{attempt:03d}_input.jsonl"
+                output_path = directory / f"attempt_{attempt:03d}_output.jsonl"
+                requests = [
+                    build_batch_request(
+                        task,
+                        round_state["round"],
+                        prior_by_task[task["task_id"]],
+                        config,
+                    )
+                    for task in pending
+                ]
+                write_batch_inputs(input_path, requests, max_records=None)
+                active = {
+                    "attempt": attempt,
+                    "input_path": str(input_path),
+                    "output_path": str(output_path),
+                    "expected": {
+                        request["custom_id"]: task["task_id"]
+                        for request, task in zip(requests, pending)
+                    },
+                    "invocations": 0,
+                    "resume_count": 0,
+                }
+                round_state["active_attempt"] = active
+                round_state["status"] = "running"
+                save_manifest()
+
+            input_path = Path(active["input_path"])
+            output_path = Path(active["output_path"])
+            expected = dict(active["expected"])
+            repair_incomplete_jsonl_tail(output_path)
+            successes, failures, seen = inspect_batch_output(
+                output_path, expected, round_state["round"]
+            )
+            save_successes(results_path, successes)
+            if seen == set(expected):
+                round_state["last_failures"] = failures
+                round_state["last_resume_count"] = active["resume_count"]
+                round_state.pop("active_attempt", None)
+                round_state["status"] = "running"
+                save_manifest()
+                continue
+
+            invocation = int(active["invocations"])
+            is_resume = invocation > 0
+            attempt = int(active["attempt"])
             directory = Path(round_state["directory"])
-            input_path = directory / f"attempt_{attempt:03d}_input.jsonl"
-            output_path = directory / f"attempt_{attempt:03d}_output.jsonl"
-            stdout_path = directory / f"attempt_{attempt:03d}.stdout.log"
-            stderr_path = directory / f"attempt_{attempt:03d}.stderr.log"
-            server_log = directory / f"attempt_{attempt:03d}.vllm.log"
-            requests = [
-                build_batch_request(
-                    task,
-                    round_state["round"],
-                    prior_by_task[task["task_id"]],
-                    config,
-                )
-                for task in pending
-            ]
-            write_batch_inputs(input_path, requests, max_records=None)
-            command, environment = self.build_command(config, input_path, output_path, server_log)
+            log_stem = f"attempt_{attempt:03d}"
+            if is_resume:
+                log_stem += f"_resume_{invocation:03d}"
+            stdout_path = directory / f"{log_stem}.stdout.log"
+            stderr_path = directory / f"{log_stem}.stderr.log"
+            server_log = directory / f"{log_stem}.vllm.log"
+            command, environment = self.build_command(
+                config,
+                input_path,
+                output_path,
+                server_log,
+                resume=is_resume,
+            )
+            active["invocations"] = invocation + 1
+            active["resume_count"] = invocation
             round_state["status"] = "running"
             round_state["last_command"] = command
+            round_state.pop("last_error", None)
             save_manifest()
             with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open(
                 "w", encoding="utf-8"
@@ -263,20 +462,39 @@ class LlmInferBatchExecutor:
                         stderr=stderr_file,
                         check=False,
                     )
-                except OSError as error:
+                except KeyboardInterrupt:
+                    round_state["status"] = "interrupted"
+                    round_state["last_exit_code"] = 130
+                    save_manifest()
+                    return "interrupted"
+                except Exception as error:
                     stderr_file.write(f"{type(error).__name__}: {error}\n")
                     stderr_file.flush()
-                    completed_process = type(
-                        "FailedProcess", (), {"returncode": 127}
-                    )()
+                    round_state["status"] = "interrupted"
+                    round_state["last_exit_code"] = 1
+                    round_state["last_error"] = f"{type(error).__name__}: {error}"
+                    save_manifest()
+                    return "interrupted"
 
-            expected = {custom_id(task, round_state["round"]): task["task_id"] for task in pending}
-            successes, failures = parse_batch_output(
+            repair_incomplete_jsonl_tail(output_path)
+            successes, failures, seen = inspect_batch_output(
                 output_path, expected, round_state["round"]
             )
             save_successes(results_path, successes)
             round_state["last_exit_code"] = completed_process.returncode
             round_state["last_failures"] = failures
+            if seen != set(expected):
+                round_state["status"] = "interrupted"
+                missing = set(expected) - seen
+                round_state["last_error"] = (
+                    f"attempt output is missing {len(missing)} terminal records"
+                )
+                save_manifest()
+                return "interrupted"
+            round_state.pop("last_error", None)
+            round_state["last_resume_count"] = active["resume_count"]
+            round_state.pop("active_attempt", None)
+            round_state["status"] = "running"
             save_manifest()
 
 

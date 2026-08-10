@@ -1,5 +1,5 @@
 """Shared orchestration primitives for generation inference."""
 
-from .orchestrator import create_run, resume_run, show_status
+from .orchestrator import continue_run, create_run, resume_run, retry_run, show_status
 
-__all__ = ["create_run", "resume_run", "show_status"]
+__all__ = ["continue_run", "create_run", "resume_run", "retry_run", "show_status"]

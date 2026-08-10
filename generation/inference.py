@@ -7,9 +7,15 @@ from pathlib import Path
 import sys
 
 if __package__:
-    from .inference_core import create_run, resume_run, show_status
+    from .inference_core import (
+        continue_run,
+        create_run,
+        resume_run,
+        retry_run,
+        show_status,
+    )
 else:
-    from inference_core import create_run, resume_run, show_status
+    from inference_core import continue_run, create_run, resume_run, retry_run, show_status
 
 
 EXECUTORS = ("api", "siliconflow-batch", "llm-infer")
@@ -44,10 +50,22 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--wait", action="store_true")
     _add_runtime_overrides(run)
 
-    resume = subparsers.add_parser("resume", help="Advance an existing run.")
+    resume = subparsers.add_parser(
+        "resume", help="Resume an interrupted API or llm-infer run."
+    )
     resume.add_argument("--run-dir", type=Path, required=True)
-    resume.add_argument("--wait", action="store_true")
-    resume.add_argument("--retry-failed", action="store_true")
+
+    continue_parser = subparsers.add_parser(
+        "continue", help="Continue a submitted SiliconFlow Batch run."
+    )
+    continue_parser.add_argument("--run-dir", type=Path, required=True)
+    continue_parser.add_argument("--wait", action="store_true")
+
+    retry = subparsers.add_parser(
+        "retry", help="Grant an incomplete run a fresh attempt budget."
+    )
+    retry.add_argument("--run-dir", type=Path, required=True)
+    retry.add_argument("--wait", action="store_true")
 
     status = subparsers.add_parser("status", help="Show persisted run status.")
     status.add_argument("--run-dir", type=Path, required=True)
@@ -81,11 +99,16 @@ def main(argv: list[str] | None = None) -> int:
                 overrides=overrides,
             )
         if args.command == "resume":
-            return resume_run(
-                args.run_dir, wait=args.wait, retry_failed=args.retry_failed
-            )
+            return resume_run(args.run_dir)
+        if args.command == "continue":
+            return continue_run(args.run_dir, wait=args.wait)
+        if args.command == "retry":
+            return retry_run(args.run_dir, wait=args.wait)
         print(json.dumps(show_status(args.run_dir), ensure_ascii=False, indent=2))
         return 0
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
     except Exception as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

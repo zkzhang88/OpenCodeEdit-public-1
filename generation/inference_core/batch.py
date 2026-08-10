@@ -61,11 +61,25 @@ def parse_batch_output(
     expected: dict[str, str],
     round_index: int,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    successes, failures, seen = inspect_batch_output(path, expected, round_index)
+    for value, task_id in expected.items():
+        if value not in seen:
+            failures[task_id] = "missing result"
+    return successes, failures
+
+
+def inspect_batch_output(
+    path: str | Path,
+    expected: dict[str, str],
+    round_index: int,
+) -> tuple[list[dict[str, Any]], dict[str, str], set[str]]:
+    """Parse terminal records without classifying absent IDs as failures."""
+
     successes: list[dict[str, Any]] = []
     failures: dict[str, str] = {}
     seen: set[str] = set()
     if not Path(path).exists():
-        return successes, {task_id: "missing output file" for task_id in expected.values()}
+        return successes, failures, seen
 
     for record in read_jsonl(path):
         value = record.get("custom_id")
@@ -111,7 +125,4 @@ def parse_batch_output(
             }
         )
 
-    for value, task_id in expected.items():
-        if value not in seen:
-            failures[task_id] = "missing result"
-    return successes, failures
+    return successes, failures, seen

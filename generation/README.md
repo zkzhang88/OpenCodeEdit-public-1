@@ -77,18 +77,20 @@ python generation/inference.py run \
   --run-dir generation/data/runs/siliconflow_deepseek
 ```
 
-Resume it with waiting enabled to collect round one, submit and collect round
+Continue it with waiting enabled to collect round one, submit and collect round
 two, and write the final output:
 
 ```bash
-python generation/inference.py resume \
+python generation/inference.py continue \
   --run-dir generation/data/runs/siliconflow_deepseek \
   --wait
 ```
 
 Add `--wait` to the initial `run` command to block through both remote rounds.
-Without `--wait`, `resume` checks the current jobs once, advances any immediately
-available stage, and exits.
+Without `--wait`, `continue` checks the current jobs once, advances any
+immediately available stage, and exits. `continue` is only valid for
+SiliconFlow runs and reuses the saved remote job IDs instead of uploading an
+active Batch again.
 
 For local vLLM inference, configure the model path and GPU settings in the
 `local-qwen3` profile and run:
@@ -106,6 +108,17 @@ python generation/inference.py run \
 By default this invokes `conda run --no-capture-output -n llm_infer
 batch-infer batch --auto-serve` once per conversation round. Set
 `auto_serve: false` and `base_url` in the profile to reuse an existing service.
+If API or local inference is interrupted, resume the same attempt with:
+
+```bash
+python generation/inference.py resume \
+  --run-dir generation/data/runs/local_qwen3
+```
+
+For local inference this reuses the existing attempt input and output files and
+invokes `batch-infer batch --resume`. Records already present in the attempt
+output are not run again. Each resume invocation gets separate stdout, stderr,
+and vLLM logs.
 
 Every task is identified by `<prompt_id>:<sample_index>`. Per-round results are
 flushed under the run directory, while the explicitly selected final output is
@@ -118,9 +131,19 @@ python generation/inference.py status --run-dir generation/data/runs/local_qwen3
 
 Failed or missing Batch requests are retried without rerunning successful tasks.
 After the configured attempt budget is exhausted, the run remains `incomplete`
-and no final output is created. After correcting the external problem, use
-`resume --retry-failed` to grant the incomplete round a fresh retry budget. The
-original prompt file must not change during a resumable run.
+and no final output is created. After correcting the external problem, grant the
+incomplete round a fresh retry budget with:
+
+```bash
+python generation/inference.py retry \
+  --run-dir generation/data/runs/local_qwen3
+```
+
+Use `retry --wait` for a SiliconFlow run when the command should wait for the
+new remote attempt. The original prompt file must not change during a run.
+Run manifests use a strict schema version; run directories created by an older
+inference implementation cannot be resumed, continued, retried, or inspected
+with this version.
 
 
 ## Extracting Edit Triplets from Model Responses

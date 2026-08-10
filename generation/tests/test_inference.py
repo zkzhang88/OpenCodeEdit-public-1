@@ -16,7 +16,13 @@ from generation.inference_core.executors import (
     SiliconFlowBatchExecutor,
 )
 from generation.inference_core.io import InferenceError, load_yaml
-from generation.inference_core.orchestrator import create_run, resume_run, show_status
+from generation.inference_core.orchestrator import (
+    continue_run,
+    create_run,
+    resume_run,
+    retry_run,
+    show_status,
+)
 from generation.inference_core.schema import expand_tasks, normalize_prompts
 
 
@@ -218,6 +224,75 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(show_status(self.run_dir)["status"], "complete")
         self.assertNotIn("secret", (self.run_dir / "manifest.yaml").read_text())
 
+    def test_api_resume_reuses_attempt_and_only_requests_missing_tasks(self):
+        class InterruptingCompletions:
+            def __init__(self):
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 2:
+                    raise KeyboardInterrupt
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content="first:" + kwargs["messages"][-1]["content"]
+                            )
+                        )
+                    ]
+                )
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        first_completions = InterruptingCompletions()
+        first_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=first_completions)
+        )
+        result = create_run(
+            executor="api",
+            model="test-api",
+            config_path=self.config_path,
+            input_path=self.input_path,
+            output_path=self.output_path,
+            run_dir=self.run_dir,
+            executor_instance=RealtimeApiExecutor(
+                client_factory=lambda **kwargs: first_client
+            ),
+        )
+        self.assertEqual(result, 130)
+        status = show_status(self.run_dir)
+        self.assertEqual(status["status"], "interrupted")
+        self.assertEqual(status["rounds"][0]["active_attempt"], 1)
+        self.assertEqual(status["rounds"][0]["attempts_used"], 1)
+
+        recovery_client = FakeApiClient()
+        result = resume_run(
+            self.run_dir,
+            executor_instance=RealtimeApiExecutor(
+                client_factory=lambda **kwargs: recovery_client
+            ),
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(len(recovery_client.chat.completions.calls), 1)
+        self.assertEqual(
+            recovery_client.chat.completions.calls[0]["messages"][-1]["content"],
+            "first-1",
+        )
+        manifest = load_yaml(self.run_dir / "manifest.yaml")
+        self.assertEqual(manifest["rounds"][0]["attempts_used"], 1)
+        self.assertEqual(show_status(self.run_dir)["rounds"][0]["resume_count"], 1)
+        self.assertEqual(
+            len(
+                (self.run_dir / "round_001" / "attempt_001_output.jsonl")
+                .read_text()
+                .splitlines()
+            ),
+            2,
+        )
+
     def test_mixed_single_and_multi_round_prompts_are_supported(self):
         mixed = [self.prompts[0], dict(self.prompts[1], user=["only-one-round"])]
         write_jsonl(self.input_path, mixed)
@@ -239,7 +314,7 @@ class InferenceTests(unittest.TestCase):
         self.assertNotIn("response_2", output[0])
         self.assertEqual(len(output[1]["response"]), 2)
 
-    def test_siliconflow_submit_then_resume_waits_through_round_two(self):
+    def test_siliconflow_submit_then_continue_waits_through_round_two(self):
         fake_client = FakeSiliconFlowClient()
         executor = SiliconFlowBatchExecutor(
             client_factory=lambda **kwargs: fake_client,
@@ -260,8 +335,10 @@ class InferenceTests(unittest.TestCase):
         status = show_status(self.run_dir)
         self.assertEqual(status["status"], "submitted")
         self.assertEqual(status["rounds"][0]["status"], "submitted")
+        with self.assertRaisesRegex(InferenceError, "continue"):
+            resume_run(self.run_dir, executor_instance=executor)
 
-        result = resume_run(
+        result = continue_run(
             self.run_dir, wait=True, executor_instance=executor
         )
         self.assertEqual(result, 0)
@@ -364,6 +441,320 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(len(attempts[0]), 2)
         self.assertEqual(len(attempts[1]), 1)
 
+    def test_llm_infer_resume_uses_same_files_and_skips_existing_output(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            del kwargs
+            calls.append(command)
+            input_path = Path(command[command.index("--input") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            requests = [json.loads(line) for line in input_path.read_text().splitlines()]
+            existing = (
+                [json.loads(line) for line in output_path.read_text().splitlines()]
+                if output_path.exists()
+                else []
+            )
+            completed_ids = {record["custom_id"] for record in existing}
+            remaining = [
+                {
+                    "custom_id": request["custom_id"],
+                    "response": {
+                        "status_code": 200,
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "local:" + request["custom_id"],
+                                    }
+                                }
+                            ]
+                        },
+                    },
+                    "error": None,
+                }
+                for request in requests
+                if request["custom_id"] not in completed_ids
+            ]
+            if not calls[:-1]:
+                write_jsonl(output_path, remaining[:1])
+                raise KeyboardInterrupt
+            write_jsonl(output_path, existing + remaining)
+            return SimpleNamespace(returncode=0)
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        executor = LlmInferBatchExecutor(runner=runner)
+        result = create_run(
+            executor="llm-infer",
+            model="test-local",
+            config_path=self.config_path,
+            input_path=self.input_path,
+            output_path=self.output_path,
+            run_dir=self.run_dir,
+            executor_instance=executor,
+        )
+        self.assertEqual(result, 130)
+        manifest = load_yaml(self.run_dir / "manifest.yaml")
+        active = manifest["rounds"][0]["active_attempt"]
+        self.assertEqual(active["resume_count"], 0)
+        self.assertIn("--no-resume", calls[0])
+
+        result = resume_run(self.run_dir, executor_instance=executor)
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--resume", calls[1])
+        for option in ("--input", "--output"):
+            self.assertEqual(
+                calls[0][calls[0].index(option) + 1],
+                calls[1][calls[1].index(option) + 1],
+            )
+        manifest = load_yaml(self.run_dir / "manifest.yaml")
+        self.assertEqual(manifest["rounds"][0]["attempts_used"], 1)
+        status = show_status(self.run_dir)["rounds"][0]
+        self.assertEqual(status["resume_count"], 1)
+        self.assertEqual(status["last_exit_code"], 0)
+        self.assertTrue(
+            (self.run_dir / "round_001" / "attempt_001_resume_001.stdout.log").exists()
+        )
+
+    def test_llm_infer_nonzero_partial_output_remains_resumable(self):
+        call_count = 0
+
+        def runner(command, **kwargs):
+            nonlocal call_count
+            del kwargs
+            call_count += 1
+            input_path = Path(command[command.index("--input") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            requests = [json.loads(line) for line in input_path.read_text().splitlines()]
+            records = [
+                {
+                    "custom_id": request["custom_id"],
+                    "response": {
+                        "status_code": 200,
+                        "body": {
+                            "choices": [
+                                {"message": {"role": "assistant", "content": "ok"}}
+                            ]
+                        },
+                    },
+                    "error": None,
+                }
+                for request in requests
+            ]
+            if call_count == 1:
+                write_jsonl(output_path, records[:1])
+                return SimpleNamespace(returncode=17)
+            existing = [json.loads(line) for line in output_path.read_text().splitlines()]
+            write_jsonl(output_path, existing + records[1:])
+            return SimpleNamespace(returncode=0)
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        executor = LlmInferBatchExecutor(runner=runner)
+        result = create_run(
+            executor="llm-infer",
+            model="test-local",
+            config_path=self.config_path,
+            input_path=self.input_path,
+            output_path=self.output_path,
+            run_dir=self.run_dir,
+            executor_instance=executor,
+        )
+        self.assertEqual(result, 130)
+        status = show_status(self.run_dir)
+        self.assertEqual(status["rounds"][0]["last_exit_code"], 17)
+        manifest_path = self.run_dir / "manifest.yaml"
+        manifest = load_yaml(manifest_path)
+        manifest["status"] = "running"
+        manifest["rounds"][0]["status"] = "running"
+        manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+        self.assertEqual(resume_run(self.run_dir, executor_instance=executor), 0)
+
+    def test_llm_infer_resume_skips_errors_then_retries_them_in_a_new_attempt(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            del kwargs
+            calls.append(command)
+            input_path = Path(command[command.index("--input") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            requests = [json.loads(line) for line in input_path.read_text().splitlines()]
+
+            def success(request):
+                return {
+                    "custom_id": request["custom_id"],
+                    "response": {
+                        "status_code": 200,
+                        "body": {
+                            "choices": [
+                                {"message": {"role": "assistant", "content": "ok"}}
+                            ]
+                        },
+                    },
+                    "error": None,
+                }
+
+            if len(calls) == 1:
+                write_jsonl(
+                    output_path,
+                    [
+                        {
+                            "custom_id": requests[0]["custom_id"],
+                            "response": None,
+                            "error": {"message": "temporary"},
+                        }
+                    ],
+                )
+                return SimpleNamespace(returncode=12)
+            if len(calls) == 2:
+                existing = [
+                    json.loads(line) for line in output_path.read_text().splitlines()
+                ]
+                write_jsonl(output_path, existing + [success(requests[1])])
+                return SimpleNamespace(returncode=0)
+            self.assertEqual(len(requests), 1)
+            write_jsonl(output_path, [success(requests[0])])
+            return SimpleNamespace(returncode=0)
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        executor = LlmInferBatchExecutor(runner=runner)
+        self.assertEqual(
+            create_run(
+                executor="llm-infer",
+                model="test-local",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                executor_instance=executor,
+            ),
+            130,
+        )
+        self.assertEqual(resume_run(self.run_dir, executor_instance=executor), 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("--resume", calls[1])
+        self.assertTrue(
+            calls[1][calls[1].index("--input") + 1].endswith(
+                "attempt_001_input.jsonl"
+            )
+        )
+        self.assertIn("--no-resume", calls[2])
+        self.assertTrue(
+            calls[2][calls[2].index("--input") + 1].endswith(
+                "attempt_002_input.jsonl"
+            )
+        )
+
+    def test_llm_infer_repairs_only_an_incomplete_final_json_fragment(self):
+        call_count = 0
+
+        def runner(command, **kwargs):
+            nonlocal call_count
+            del kwargs
+            call_count += 1
+            input_path = Path(command[command.index("--input") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            requests = [json.loads(line) for line in input_path.read_text().splitlines()]
+
+            def success(request):
+                return {
+                    "custom_id": request["custom_id"],
+                    "response": {
+                        "status_code": 200,
+                        "body": {
+                            "choices": [
+                                {"message": {"role": "assistant", "content": "ok"}}
+                            ]
+                        },
+                    },
+                    "error": None,
+                }
+
+            if call_count == 1:
+                output_path.write_bytes(
+                    (json.dumps(success(requests[0])) + "\n").encode()
+                    + b'{"custom_id":'
+                )
+                return SimpleNamespace(returncode=9)
+            existing = [json.loads(line) for line in output_path.read_text().splitlines()]
+            write_jsonl(output_path, existing + [success(requests[1])])
+            return SimpleNamespace(returncode=0)
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        executor = LlmInferBatchExecutor(runner=runner)
+        self.assertEqual(
+            create_run(
+                executor="llm-infer",
+                model="test-local",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                executor_instance=executor,
+            ),
+            130,
+        )
+        self.assertTrue(
+            (
+                self.run_dir
+                / "round_001"
+                / "attempt_001_output.jsonl.corrupt_tail_001"
+            ).exists()
+        )
+        self.assertEqual(resume_run(self.run_dir, executor_instance=executor), 0)
+
+    def test_llm_infer_rejects_corruption_before_the_final_line(self):
+        def runner(command, **kwargs):
+            del kwargs
+            input_path = Path(command[command.index("--input") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            requests = [json.loads(line) for line in input_path.read_text().splitlines()]
+            valid = {
+                "custom_id": requests[0]["custom_id"],
+                "response": {
+                    "status_code": 200,
+                    "body": {
+                        "choices": [
+                            {"message": {"role": "assistant", "content": "ok"}}
+                        ]
+                    },
+                },
+                "error": None,
+            }
+            output_path.write_text(
+                json.dumps(valid) + "\n" + '{"broken":\n' + json.dumps(valid) + "\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0)
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        with self.assertRaisesRegex(InferenceError, "invalid JSON"):
+            create_run(
+                executor="llm-infer",
+                model="test-local",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                executor_instance=LlmInferBatchExecutor(runner=runner),
+            )
+
     def test_batch_parser_rejects_duplicate_custom_id(self):
         output = self.root / "batch.jsonl"
         record = {
@@ -425,15 +816,46 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(show_status(self.run_dir)["status"], "incomplete")
 
         should_succeed = True
-        result = resume_run(
-            self.run_dir,
-            retry_failed=True,
-            executor_instance=executor,
-        )
+        result = retry_run(self.run_dir, executor_instance=executor)
         self.assertEqual(result, 0)
         self.assertTrue(self.output_path.exists())
         manifest = load_yaml(self.run_dir / "manifest.yaml")
         self.assertEqual(manifest["rounds"][0]["attempt_limit"], 4)
+
+    def test_command_executor_boundaries_and_retry_state_are_enforced(self):
+        write_jsonl(self.input_path, [dict(self.prompts[0], user=["only round"])])
+        result = create_run(
+            executor="api",
+            model="test-api",
+            config_path=self.config_path,
+            input_path=self.input_path,
+            output_path=self.output_path,
+            run_dir=self.run_dir,
+            executor_instance=RealtimeApiExecutor(
+                client_factory=lambda **kwargs: FakeApiClient()
+            ),
+        )
+        self.assertEqual(result, 0)
+        with self.assertRaisesRegex(InferenceError, "Only SiliconFlow"):
+            continue_run(self.run_dir)
+        with self.assertRaisesRegex(InferenceError, "Only an incomplete run"):
+            retry_run(self.run_dir)
+
+    def test_old_manifest_schema_is_rejected_without_modification(self):
+        self.run_dir.mkdir()
+        manifest_path = self.run_dir / "manifest.yaml"
+        manifest_path.write_text("schema_version: 1\n", encoding="utf-8")
+        original = manifest_path.read_bytes()
+        operations = (
+            lambda: resume_run(self.run_dir),
+            lambda: continue_run(self.run_dir),
+            lambda: retry_run(self.run_dir),
+            lambda: show_status(self.run_dir),
+        )
+        for operation in operations:
+            with self.assertRaisesRegex(InferenceError, "Unsupported manifest"):
+                operation()
+            self.assertEqual(manifest_path.read_bytes(), original)
 
 
 if __name__ == "__main__":
