@@ -98,6 +98,19 @@ immediately available stage, and exits. `continue` is only valid for
 SiliconFlow runs and reuses the saved remote job IDs instead of uploading an
 active Batch again.
 
+Every SiliconFlow poll writes a timestamped summary and one detail line per
+Batch part to stderr. This applies to `continue`, `continue --wait`, `run
+--wait`, and `retry --wait`, including semantic-check runs. The output includes
+the round, attempt, persistent poll number, aggregate status counts, job IDs,
+status transitions, and output or error file IDs; it never includes prompts or
+model responses. Redirect both streams to preserve these messages in a log:
+
+```bash
+python generation/inference.py continue \
+  --run-dir generation/data/runs/siliconflow_deepseek \
+  --wait 2>&1 | tee siliconflow_continue.log
+```
+
 For local vLLM inference, configure the model path and GPU settings in the
 `local-qwen3` profile and run:
 

@@ -471,9 +471,11 @@ class SemanticWorkflowTests(unittest.TestCase):
     def test_siliconflow_submission_continue_and_json_mode(self):
         write_jsonl(self.input_path, self.records[:1])
         client = FakeSiliconFlowClient(check_payload())
+        reports = []
         executor = SiliconFlowBatchExecutor(
             client_factory=lambda **kwargs: client,
             sleeper=lambda seconds: None,
+            poll_reporter=reports.append,
         )
         result = create_semantic_run(
             executor="siliconflow-batch",
@@ -499,6 +501,12 @@ class SemanticWorkflowTests(unittest.TestCase):
             client.files.request_bodies[0]["response_format"],
             {"type": "json_object"},
         )
+        self.assertEqual(len(reports), 2)
+        self.assertIn("SiliconFlow poll #1", reports[0])
+        self.assertIn("round=1 attempt=1", reports[0])
+        self.assertIn("overall=completed", reports[0])
+        self.assertIn("part=1 job_id=job-1", reports[1])
+        self.assertIn("current_status=completed", reports[1])
 
     def test_local_batch_inference_uses_json_mode(self):
         write_jsonl(self.input_path, self.records[:1])

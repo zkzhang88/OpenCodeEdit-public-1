@@ -149,6 +149,28 @@ class FakeSiliconFlowBatches:
         )
 
 
+class SequencedSiliconFlowBatches(FakeSiliconFlowBatches):
+    def __init__(self, status_sequences):
+        super().__init__()
+        self.status_sequences = status_sequences
+        self.retrieve_counts = {}
+
+    def retrieve(self, job_id):
+        count = self.retrieve_counts.get(job_id, 0)
+        self.retrieve_counts[job_id] = count + 1
+        sequence = self.status_sequences[int(job_id.removeprefix("job-")) - 1]
+        status = sequence[min(count, len(sequence) - 1)]
+        if isinstance(status, Exception):
+            raise status
+        file_id = self.jobs[job_id]
+        return SimpleNamespace(
+            id=job_id,
+            status=status,
+            output_file_id=f"output-{file_id}" if status == "completed" else None,
+            error_file_id=None,
+        )
+
+
 class FakeSiliconFlowClient:
     def __init__(self):
         self.files = FakeSiliconFlowFiles()
@@ -450,6 +472,154 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual([record["task_id"] for record in output], ["1:1", "2:1"])
         self.assertEqual(output[0]["response"], ["remote:first-1", "remote:second-1"])
         self.assertEqual(len(fake_client.batches.jobs), 2)
+
+    def test_siliconflow_continue_reports_each_poll_and_persists_count(self):
+        write_jsonl(
+            self.input_path,
+            [dict(self.prompts[0], user=["only-round"])],
+        )
+        client = FakeSiliconFlowClient()
+        client.batches = SequencedSiliconFlowBatches(
+            [["in_progress", "completed"]]
+        )
+        reports = []
+        executor = SiliconFlowBatchExecutor(
+            client_factory=lambda **kwargs: client,
+            sleeper=lambda seconds: None,
+            poll_reporter=reports.append,
+        )
+        self.assertEqual(
+            create_run(
+                executor="siliconflow-batch",
+                model="test-sf",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                wait=False,
+                executor_instance=executor,
+            ),
+            0,
+        )
+        self.assertEqual(reports, [])
+
+        self.assertEqual(
+            continue_run(self.run_dir, wait=False, executor_instance=executor), 0
+        )
+        active = load_yaml(self.run_dir / "manifest.yaml")["rounds"][0][
+            "active_attempt"
+        ]
+        self.assertEqual(active["poll_count"], 1)
+        self.assertIn("SiliconFlow poll #1", reports[0])
+        self.assertIn("overall=running", reports[0])
+        self.assertIn("previous_status=in_progress", reports[1])
+        self.assertIn("current_status=in_progress", reports[1])
+        self.assertIn("queried=yes", reports[1])
+
+        self.assertEqual(
+            continue_run(self.run_dir, wait=True, executor_instance=executor), 0
+        )
+        self.assertIn("SiliconFlow poll #2", reports[2])
+        self.assertIn("overall=completed", reports[2])
+        self.assertIn("current_status=completed", reports[3])
+        round_state = load_yaml(self.run_dir / "manifest.yaml")["rounds"][0]
+        self.assertEqual(round_state["last_poll_count"], 2)
+
+    def test_siliconflow_poll_reports_terminal_parts_without_querying_again(self):
+        batches = SimpleNamespace()
+        batches.calls = []
+
+        def retrieve(job_id):
+            batches.calls.append(job_id)
+            status = "in_progress" if len(batches.calls) == 1 else "failed"
+            return SimpleNamespace(
+                id=job_id,
+                status=status,
+                output_file_id=None,
+                error_file_id="error-running" if status == "failed" else None,
+            )
+
+        batches.retrieve = retrieve
+        round_state = {
+            "round": 2,
+            "active_attempt": {
+                "attempt": 3,
+                "parts": [
+                    {
+                        "part": 1,
+                        "job_id": "job-complete",
+                        "status": "completed",
+                        "output_file_id": "output-complete",
+                    },
+                    {"part": 2, "job_id": "job-running", "status": "in_progress"},
+                ],
+            },
+        }
+        reports = []
+        executor = SiliconFlowBatchExecutor(poll_reporter=reports.append)
+
+        self.assertFalse(
+            executor._poll_active(
+                SimpleNamespace(batches=batches), round_state, lambda: None
+            )
+        )
+        self.assertEqual(batches.calls, ["job-running"])
+        self.assertEqual(round_state["active_attempt"]["poll_count"], 1)
+        self.assertIn("statuses=completed:1,in_progress:1", reports[0])
+        self.assertIn("job_id=job-complete", reports[1])
+        self.assertIn("queried=no", reports[1])
+        self.assertIn("job_id=job-running", reports[2])
+        self.assertIn("queried=yes", reports[2])
+
+        self.assertTrue(
+            executor._poll_active(
+                SimpleNamespace(batches=batches), round_state, lambda: None
+            )
+        )
+        self.assertEqual(batches.calls, ["job-running", "job-running"])
+        self.assertEqual(round_state["active_attempt"]["poll_count"], 2)
+        self.assertIn("SiliconFlow poll #2", reports[3])
+        self.assertIn("overall=terminal_with_errors", reports[3])
+        self.assertIn("queried=no", reports[4])
+        self.assertIn("current_status=failed", reports[5])
+        self.assertIn("error_file_id=error-running", reports[5])
+
+    def test_siliconflow_poll_reports_query_errors(self):
+        def retrieve(job_id):
+            raise RuntimeError("temporary poll failure")
+
+        round_state = {
+            "round": 4,
+            "active_attempt": {
+                "attempt": 2,
+                "parts": [
+                    {"part": 7, "job_id": "job-error", "status": "in_progress"}
+                ],
+            },
+        }
+        saved_poll_counts = []
+        reports = []
+        executor = SiliconFlowBatchExecutor(poll_reporter=reports.append)
+
+        with self.assertRaisesRegex(RuntimeError, "temporary poll failure"):
+            executor._poll_active(
+                SimpleNamespace(batches=SimpleNamespace(retrieve=retrieve)),
+                round_state,
+                lambda: saved_poll_counts.append(
+                    round_state["active_attempt"]["poll_count"]
+                ),
+            )
+        self.assertEqual(saved_poll_counts, [1])
+        self.assertEqual(len(reports), 1)
+        for expected in (
+            "SiliconFlow poll #1 query failed",
+            "round=4",
+            "attempt=2",
+            "part=7",
+            "job_id=job-error",
+            "RuntimeError: temporary poll failure",
+        ):
+            self.assertIn(expected, reports[0])
 
     def test_llm_infer_runs_each_round_with_safe_command(self):
         calls = []

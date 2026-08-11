@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import subprocess
@@ -25,6 +27,14 @@ from .io import (
     repair_incomplete_jsonl_tail,
 )
 from .schema import parse_custom_id, round_messages
+
+
+def _stderr_report(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _value(value: Any, name: str, default: Any = None) -> Any:
@@ -551,9 +561,11 @@ class SiliconFlowBatchExecutor:
         self,
         client_factory: Callable[..., Any] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
+        poll_reporter: Callable[[str], None] | None = None,
     ):
         self.client_factory = client_factory
         self.sleeper = sleeper
+        self.poll_reporter = poll_reporter or _stderr_report
 
     def _client(self, config: dict[str, Any]) -> Any:
         api_key, base_url = load_credentials(config)
@@ -612,7 +624,7 @@ class SiliconFlowBatchExecutor:
             requests,
             int(executor_config.get("max_requests_per_file", 6000)),
         )
-        active = {"attempt": attempt, "parts": []}
+        active = {"attempt": attempt, "poll_count": 0, "parts": []}
         round_state["active_attempt"] = active
         round_state["status"] = "submitted"
         save_manifest()
@@ -652,22 +664,75 @@ class SiliconFlowBatchExecutor:
         save_manifest: Callable[[], None],
     ) -> bool:
         active = round_state["active_attempt"]
+        active["poll_count"] = int(active.get("poll_count", 0)) + 1
+        poll_count = active["poll_count"]
+        timestamp = _utc_timestamp()
         all_terminal = True
+        details: list[dict[str, Any]] = []
         for part in active["parts"]:
-            if part["status"] in self.TERMINAL_STATUSES:
-                continue
-            job = client.batches.retrieve(part["job_id"])
-            status = str(_value(job, "status", "unknown")).lower()
-            part["status"] = status
-            output_file_id = _value(job, "output_file_id")
-            if output_file_id:
-                part["output_file_id"] = output_file_id
-            error_file_id = _value(job, "error_file_id")
-            if error_file_id:
-                part["error_file_id"] = error_file_id
+            previous_status = str(part.get("status", "unknown")).lower()
+            queried = previous_status not in self.TERMINAL_STATUSES
+            if queried:
+                try:
+                    job = client.batches.retrieve(part["job_id"])
+                except Exception as error:
+                    save_manifest()
+                    error_message = f"{type(error).__name__}: {error}"
+                    self.poll_reporter(
+                        f"[{timestamp}] SiliconFlow poll #{poll_count} query failed: "
+                        f"round={round_state['round']} attempt={active['attempt']} "
+                        f"part={part['part']} job_id={part['job_id']} "
+                        f"error={error_message}"
+                    )
+                    raise
+                status = str(_value(job, "status", "unknown")).lower()
+                part["status"] = status
+                output_file_id = _value(job, "output_file_id")
+                if output_file_id:
+                    part["output_file_id"] = output_file_id
+                error_file_id = _value(job, "error_file_id")
+                if error_file_id:
+                    part["error_file_id"] = error_file_id
+            else:
+                status = previous_status
             if status not in self.TERMINAL_STATUSES:
                 all_terminal = False
+            details.append(
+                {
+                    "part": part["part"],
+                    "job_id": part["job_id"],
+                    "previous_status": previous_status,
+                    "current_status": status,
+                    "queried": queried,
+                    "output_file_id": part.get("output_file_id"),
+                    "error_file_id": part.get("error_file_id"),
+                }
+            )
         save_manifest()
+        statuses = Counter(detail["current_status"] for detail in details)
+        if not all_terminal:
+            overall = "running"
+        elif all(status == "completed" for status in statuses):
+            overall = "completed"
+        else:
+            overall = "terminal_with_errors"
+        status_summary = ",".join(
+            f"{status}:{count}" for status, count in sorted(statuses.items())
+        )
+        self.poll_reporter(
+            f"[{timestamp}] SiliconFlow poll #{poll_count}: "
+            f"round={round_state['round']} attempt={active['attempt']} "
+            f"overall={overall} parts={len(details)} statuses={status_summary or '-'}"
+        )
+        for detail in details:
+            self.poll_reporter(
+                f"  part={detail['part']} job_id={detail['job_id']} "
+                f"previous_status={detail['previous_status']} "
+                f"current_status={detail['current_status']} "
+                f"queried={'yes' if detail['queried'] else 'no'} "
+                f"output_file_id={detail['output_file_id'] or '-'} "
+                f"error_file_id={detail['error_file_id'] or '-'}"
+            )
         return all_terminal
 
     def _collect_active(
@@ -748,6 +813,7 @@ class SiliconFlowBatchExecutor:
 
             failures = self._collect_active(client, round_state)
             round_state["last_failures"] = failures
+            round_state["last_poll_count"] = active.get("poll_count", 0)
             round_state.pop("active_attempt", None)
             save_manifest()
             if not wait and failures:
