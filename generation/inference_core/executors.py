@@ -56,6 +56,15 @@ def _object_id(value: Any) -> str:
     return object_id
 
 
+def _remote_file_label(remote_file: Any) -> str:
+    if not remote_file:
+        return "-"
+    value = str(remote_file)
+    if urlsplit(value).scheme.lower() in {"http", "https"}:
+        return "<redacted-url>"
+    return value
+
+
 def load_round_results(path: str | Path) -> dict[str, dict[str, Any]]:
     path = Path(path)
     if not path.exists():
@@ -634,6 +643,48 @@ class SiliconFlowBatchExecutor:
                 except FileNotFoundError:
                     pass
 
+    def _download_part_file(
+        self,
+        client: Any,
+        round_state: dict[str, Any],
+        part: dict[str, Any],
+        *,
+        kind: str,
+        remote_file: str,
+        path: Path,
+    ) -> None:
+        active = round_state["active_attempt"]
+        source_type = (
+            "url"
+            if urlsplit(remote_file).scheme.lower() in {"http", "https"}
+            else "files-api"
+        )
+        context = (
+            f"round={round_state['round']} attempt={active['attempt']} "
+            f"part={part['part']} kind={kind}"
+        )
+        self.poll_reporter(
+            f"[siliconflow-batch] download start {context} "
+            f"source={source_type} target={path}"
+        )
+        try:
+            self._write_remote_content(client, remote_file, path)
+        except Exception as error:
+            error_message = f"{type(error).__name__}: {error}"
+            if source_type == "url":
+                error_message = error_message.replace(
+                    remote_file, "<redacted-url>"
+                )
+            self.poll_reporter(
+                f"[siliconflow-batch] download failed {context} "
+                f"error={error_message}"
+            )
+            raise
+        self.poll_reporter(
+            f"[siliconflow-batch] download complete {context} "
+            f"bytes={path.stat().st_size} target={path}"
+        )
+
     def _submit_attempt(
         self,
         client: Any,
@@ -770,8 +821,8 @@ class SiliconFlowBatchExecutor:
                 f"previous_status={detail['previous_status']} "
                 f"current_status={detail['current_status']} "
                 f"queried={'yes' if detail['queried'] else 'no'} "
-                f"output_file_id={detail['output_file_id'] or '-'} "
-                f"error_file_id={detail['error_file_id'] or '-'}"
+                f"output_file_id={_remote_file_label(detail['output_file_id'])} "
+                f"error_file_id={_remote_file_label(detail['error_file_id'])}"
             )
         return all_terminal
 
@@ -784,12 +835,14 @@ class SiliconFlowBatchExecutor:
         attempt = active["attempt"]
         failures: dict[str, str] = {}
         successes: list[dict[str, Any]] = []
+        expected_total = 0
         for part in active["parts"]:
             input_records = read_jsonl(part["input_path"])
             expected = {}
             for record in input_records:
                 task_id, _ = parse_custom_id(record["custom_id"])
                 expected[record["custom_id"]] = task_id
+            expected_total += len(expected)
             output_path = Path(round_state["directory"]) / (
                 f"attempt_{attempt:03d}_part{part['part']:03d}_output.jsonl"
             )
@@ -797,18 +850,62 @@ class SiliconFlowBatchExecutor:
                 error_path = Path(round_state["directory"]) / (
                     f"attempt_{attempt:03d}_part{part['part']:03d}_errors.jsonl"
                 )
-                self._write_remote_content(client, part["error_file_id"], error_path)
+                self._download_part_file(
+                    client,
+                    round_state,
+                    part,
+                    kind="error",
+                    remote_file=part["error_file_id"],
+                    path=error_path,
+                )
             if part["status"] == "completed" and part.get("output_file_id"):
-                self._write_remote_content(client, part["output_file_id"], output_path)
-                part_successes, part_failures = parse_batch_output(
-                    output_path, expected, round_state["round"]
+                self._download_part_file(
+                    client,
+                    round_state,
+                    part,
+                    kind="output",
+                    remote_file=part["output_file_id"],
+                    path=output_path,
+                )
+                context = (
+                    f"round={round_state['round']} attempt={attempt} "
+                    f"part={part['part']}"
+                )
+                self.poll_reporter(
+                    f"[siliconflow-batch] parse start {context} "
+                    f"input={output_path}"
+                )
+                try:
+                    part_successes, part_failures = parse_batch_output(
+                        output_path, expected, round_state["round"]
+                    )
+                except Exception as error:
+                    self.poll_reporter(
+                        f"[siliconflow-batch] parse failed {context} "
+                        f"error={type(error).__name__}: {error}"
+                    )
+                    raise
+                self.poll_reporter(
+                    f"[siliconflow-batch] parse complete {context} "
+                    f"successes={len(part_successes)} failures={len(part_failures)}"
                 )
                 successes.extend(part_successes)
                 failures.update(part_failures)
             else:
                 reason = f"batch job ended with status {part['status']}"
                 failures.update({task_id: reason for task_id in expected.values()})
+        self.poll_reporter(
+            f"[siliconflow-batch] merge start round={round_state['round']} "
+            f"attempt={attempt} parts={len(active['parts'])} "
+            f"successes={len(successes)} failures={len(failures)}"
+        )
         save_successes(round_state["results_path"], successes)
+        completed = load_round_results(round_state["results_path"])
+        self.poll_reporter(
+            f"[siliconflow-batch] merge complete round={round_state['round']} "
+            f"attempt={attempt} completed={len(completed)} "
+            f"expected={expected_total}"
+        )
         return failures
 
     def advance_round(

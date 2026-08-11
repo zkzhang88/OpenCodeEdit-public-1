@@ -182,7 +182,9 @@ class UrlSiliconFlowBatches(FakeSiliconFlowBatches):
         return SimpleNamespace(
             id=job_id,
             status="completed",
-            output_file_id=f"https://downloads.invalid/{file_id}.jsonl",
+            output_file_id=(
+                f"https://downloads.invalid/{file_id}.jsonl?signature=top-secret"
+            ),
             error_file_id=None,
         )
 
@@ -490,19 +492,24 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(len(fake_client.batches.jobs), 2)
 
     def test_siliconflow_downloads_url_output_without_files_api(self):
+        config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        config["executors"]["siliconflow-batch"]["max_requests_per_file"] = 1
+        self.config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
         fake_client = FakeSiliconFlowClient()
         fake_client.batches = UrlSiliconFlowBatches()
         downloads = []
+        reports = []
 
         def open_url(url, timeout):
             downloads.append((url, timeout))
-            file_name = url.rsplit("/", 1)[-1]
+            file_name = url.split("?", 1)[0].rsplit("/", 1)[-1]
             file_id = file_name.removesuffix(".jsonl")
             return io.BytesIO(fake_client.files.output_bytes(file_id))
 
         executor = SiliconFlowBatchExecutor(
             client_factory=lambda **kwargs: fake_client,
             sleeper=lambda seconds: None,
+            poll_reporter=reports.append,
             url_opener=open_url,
         )
         self.assertEqual(
@@ -525,12 +532,96 @@ class InferenceTests(unittest.TestCase):
 
         output = [json.loads(line) for line in self.output_path.read_text().splitlines()]
         self.assertEqual([record["task_id"] for record in output], ["1:1", "2:1"])
-        self.assertEqual(len(downloads), 2)
+        self.assertEqual(len(downloads), 4)
         self.assertTrue(
             all(url.startswith("https://downloads.invalid/") for url, _ in downloads)
         )
         self.assertTrue(all(timeout == 600 for _, timeout in downloads))
         self.assertEqual(fake_client.files.content_calls, [])
+        report_text = "\n".join(reports)
+        for expected in (
+            "[siliconflow-batch] download start round=1 attempt=1 part=1",
+            "[siliconflow-batch] download complete round=1 attempt=1 part=2",
+            "[siliconflow-batch] parse start round=1 attempt=1 part=1",
+            "[siliconflow-batch] parse complete round=1 attempt=1 part=2",
+            "[siliconflow-batch] merge start round=1 attempt=1 parts=2",
+            "[siliconflow-batch] merge complete round=1 attempt=1 completed=2 expected=2",
+            "source=url",
+            "bytes=",
+        ):
+            self.assertIn(expected, report_text)
+        self.assertNotIn("top-secret", report_text)
+
+    def test_siliconflow_reports_download_failure_without_leaking_url(self):
+        reports = []
+
+        def fail_download(url, timeout):
+            del url, timeout
+            raise RuntimeError("download unavailable")
+
+        executor = SiliconFlowBatchExecutor(
+            poll_reporter=reports.append,
+            url_opener=fail_download,
+        )
+        round_state = {
+            "round": 3,
+            "directory": str(self.root),
+            "active_attempt": {"attempt": 2},
+        }
+        part = {"part": 4}
+        signed_url = "https://downloads.invalid/output.jsonl?signature=top-secret"
+        with self.assertRaisesRegex(RuntimeError, "download unavailable"):
+            executor._download_part_file(
+                SimpleNamespace(),
+                round_state,
+                part,
+                kind="output",
+                remote_file=signed_url,
+                path=self.root / "output.jsonl",
+            )
+        self.assertIn("download start round=3 attempt=2 part=4", reports[0])
+        self.assertIn("source=url", reports[0])
+        self.assertIn("download failed round=3 attempt=2 part=4", reports[1])
+        self.assertIn("RuntimeError: download unavailable", reports[1])
+        self.assertNotIn("top-secret", "\n".join(reports))
+
+    def test_siliconflow_reports_parse_failure(self):
+        input_path = self.root / "part_input.jsonl"
+        write_jsonl(
+            input_path,
+            [{"custom_id": "task-1-1-round-1", "body": {}}],
+        )
+        reports = []
+        executor = SiliconFlowBatchExecutor(poll_reporter=reports.append)
+        client = SimpleNamespace(
+            files=SimpleNamespace(
+                content=lambda remote_file: SimpleNamespace(content=b"not-json\n")
+            )
+        )
+        round_state = {
+            "round": 1,
+            "directory": str(self.root),
+            "results_path": str(self.root / "round_results.jsonl"),
+            "active_attempt": {
+                "attempt": 1,
+                "parts": [
+                    {
+                        "part": 1,
+                        "input_path": str(input_path),
+                        "status": "completed",
+                        "output_file_id": "output-file-1",
+                    }
+                ],
+            },
+        }
+
+        with self.assertRaisesRegex(InferenceError, "invalid JSON"):
+            executor._collect_active(client, round_state)
+        report_text = "\n".join(reports)
+        self.assertIn("[siliconflow-batch] download complete", report_text)
+        self.assertIn("[siliconflow-batch] parse start", report_text)
+        self.assertIn("[siliconflow-batch] parse failed", report_text)
+        self.assertNotIn("[siliconflow-batch] merge start", report_text)
 
     def test_siliconflow_continue_reports_each_poll_and_persists_count(self):
         write_jsonl(

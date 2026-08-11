@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ from generation.semantic_check import (
     ResponseValidationError,
     continue_semantic_run,
     create_semantic_run,
+    main,
     make_diff,
     render_user_prompt,
     retry_semantic_run,
@@ -348,8 +351,28 @@ class SemanticWorkflowTests(unittest.TestCase):
             check_payload(),
             check_payload(pre="UNCERTAIN"),
         ]
-        result, client, _ = self.api_run(responses, progress_factory=progress)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result, client, _ = self.api_run(
+                responses, progress_factory=progress
+            )
         self.assertEqual(result, 0)
+        report = stderr.getvalue()
+        for expected in (
+            "[semantic] prepare attempt=1 samples=3 executor=api",
+            "[semantic] inference start attempt=1 samples=3",
+            "[semantic] inference complete attempt=1 samples=3",
+            "[semantic] validation start attempt=1 samples=3",
+            "[semantic] validation complete attempt=1 valid=2 retry=1 exhausted=0",
+            "[semantic] retry prepare next_attempt=2 samples=1",
+            "[semantic] validation complete attempt=2 valid=1 retry=0 exhausted=0",
+            "[semantic] finalize start samples=3",
+            "[semantic] write results path=",
+            "[semantic] write filtered path=",
+            "[semantic] write summary path=",
+            "[semantic] complete ACCEPT=1 REJECT=1 UNCERTAIN=1 ERROR=0",
+        ):
+            self.assertIn(expected, report)
         results_path = self.input_path.with_name(
             "static_filtered_semantic_results.jsonl"
         )
@@ -393,9 +416,11 @@ class SemanticWorkflowTests(unittest.TestCase):
 
     def test_invalid_response_retries_twice_then_becomes_error(self):
         write_jsonl(self.input_path, self.records[:1])
-        result, client, _ = self.api_run(
-            ["bad one", "bad two", (json.dumps(check_payload()), "length")]
-        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result, client, _ = self.api_run(
+                ["bad one", "bad two", (json.dumps(check_payload()), "length")]
+            )
         self.assertEqual(result, 0)
         output = read_jsonl(
             self.input_path.with_name("static_filtered_semantic_results.jsonl")
@@ -404,6 +429,14 @@ class SemanticWorkflowTests(unittest.TestCase):
         self.assertEqual(output["semantic_attempt_count"], 3)
         self.assertEqual(len(client.completions.calls), 3)
         self.assertEqual(output["error"]["message"], "Model response was truncated")
+        self.assertIn(
+            "[semantic] validation complete attempt=3 valid=0 retry=0 exhausted=1",
+            stderr.getvalue(),
+        )
+        self.assertIn(
+            "[semantic] complete ACCEPT=0 REJECT=0 UNCERTAIN=0 ERROR=1",
+            stderr.getvalue(),
+        )
 
     def test_invalid_input_fails_before_creating_run(self):
         invalid = dict(self.records[0])
@@ -477,36 +510,64 @@ class SemanticWorkflowTests(unittest.TestCase):
             sleeper=lambda seconds: None,
             poll_reporter=reports.append,
         )
-        result = create_semantic_run(
-            executor="siliconflow-batch",
-            model="test-sf",
-            config_path=self.config_path,
-            input_path=self.input_path,
-            run_dir=self.run_dir,
-            executor_instance=executor,
-        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = create_semantic_run(
+                executor="siliconflow-batch",
+                model="test-sf",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                run_dir=self.run_dir,
+                executor_instance=executor,
+            )
         self.assertEqual(result, 0)
         self.assertEqual(semantic_status(self.run_dir)["status"], "submitted")
         self.assertFalse(
             self.input_path.with_name("static_filtered_semantic_results.jsonl").exists()
         )
-        self.assertEqual(
-            continue_semantic_run(
-                self.run_dir, wait=True, executor_instance=executor
-            ),
-            0,
-        )
+        with redirect_stderr(stderr):
+            self.assertEqual(
+                continue_semantic_run(
+                    self.run_dir, wait=True, executor_instance=executor
+                ),
+                0,
+            )
         self.assertEqual(semantic_status(self.run_dir)["status"], "complete")
         self.assertEqual(
             client.files.request_bodies[0]["response_format"],
             {"type": "json_object"},
         )
-        self.assertEqual(len(reports), 2)
         self.assertIn("SiliconFlow poll #1", reports[0])
         self.assertIn("round=1 attempt=1", reports[0])
         self.assertIn("overall=completed", reports[0])
         self.assertIn("part=1 job_id=job-1", reports[1])
         self.assertIn("current_status=completed", reports[1])
+        report_text = "\n".join(reports)
+        self.assertIn("[siliconflow-batch] download start", report_text)
+        self.assertIn("[siliconflow-batch] download complete", report_text)
+        self.assertIn("[siliconflow-batch] parse complete", report_text)
+        self.assertIn("[siliconflow-batch] merge complete", report_text)
+        semantic_report = stderr.getvalue()
+        self.assertIn("[semantic] inference pending attempt=1 status=submitted", semantic_report)
+        self.assertIn("[semantic] validation start attempt=1 samples=1", semantic_report)
+        self.assertIn(
+            "[semantic] complete ACCEPT=1 REJECT=0 UNCERTAIN=0 ERROR=0",
+            semantic_report,
+        )
+
+    def test_status_stdout_remains_json_and_stderr_is_empty(self):
+        write_jsonl(self.input_path, self.records[:1])
+        with redirect_stderr(io.StringIO()):
+            result, _, _ = self.api_run([check_payload()])
+        self.assertEqual(result, 0)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status_result = main(["status", "--run-dir", str(self.run_dir)])
+        self.assertEqual(status_result, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "complete")
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_local_batch_inference_uses_json_mode(self):
         write_jsonl(self.input_path, self.records[:1])

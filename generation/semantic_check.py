@@ -76,6 +76,10 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _semantic_report(message: str) -> None:
+    print(f"[semantic] {message}", file=sys.stderr, flush=True)
+
+
 def validate_prompt_template(user_prompt: str) -> None:
     """Require every supported placeholder exactly once."""
 
@@ -399,6 +403,10 @@ def _start_attempt(
     if not pending_ids:
         return _finalize(manifest, state)
 
+    _semantic_report(
+        f"prepare attempt={attempt_number} samples={len(pending_ids)} "
+        f"executor={manifest['executor']}"
+    )
     system_prompt, user_prompt = get_prompts()
     _, all_prompts = _load_and_prepare_input(
         Path(manifest["input_path"]),
@@ -424,6 +432,10 @@ def _start_attempt(
     manifest["status"] = "running"
     _save_manifest(manifest)
 
+    _semantic_report(
+        f"inference start attempt={attempt_number} samples={len(prompts)} "
+        f"run_dir={paths['inference_dir']}"
+    )
     result = create_run(
         executor=manifest["executor"],
         model=manifest["model_name"],
@@ -587,11 +599,33 @@ def _after_child_advance(
     if child["status"] != "complete":
         manifest["status"] = child["status"]
         _save_manifest(manifest)
+        _semantic_report(
+            f"inference pending attempt={attempt['attempt']} "
+            f"status={child['status']}"
+        )
         return result
 
+    _semantic_report(
+        f"inference complete attempt={attempt['attempt']} "
+        f"samples={attempt['task_count']}"
+    )
     state = _load_state(manifest)
+    _semantic_report(
+        f"validation start attempt={attempt['attempt']} "
+        f"samples={attempt['task_count']}"
+    )
     _process_attempt(manifest, state, attempt)
-    if any(item["status"] == "pending" for item in state):
+    _semantic_report(
+        f"validation complete attempt={attempt['attempt']} "
+        f"valid={attempt['valid_count']} retry={attempt['retry_count']} "
+        f"exhausted={attempt['exhausted_count']}"
+    )
+    pending_count = sum(item["status"] == "pending" for item in state)
+    if pending_count:
+        _semantic_report(
+            f"retry prepare next_attempt={attempt['attempt'] + 1} "
+            f"samples={pending_count}"
+        )
         return _start_attempt(
             manifest, state, wait=wait, executor_instance=executor_instance
         )
@@ -646,6 +680,7 @@ def _atomic_write_selected_lines(
 
 
 def _finalize(manifest: dict[str, Any], state: list[dict[str, Any]]) -> int:
+    _semantic_report(f"finalize start samples={len(state)}")
     child_manifest = load_yaml(
         Path(manifest["attempts"][0]["inference_dir"]) / "manifest.yaml"
     )
@@ -674,7 +709,11 @@ def _finalize(manifest: dict[str, Any], state: list[dict[str, Any]]) -> int:
         item["line_number"] for item in results if item["decision"] == "ACCEPT"
     }
     output_paths = manifest["output_paths"]
+    _semantic_report(f"write results path={output_paths['results']}")
     atomic_write_jsonl(output_paths["results"], results)
+    _semantic_report(
+        f"write filtered path={output_paths['filtered']} samples={len(accepted)}"
+    )
     _atomic_write_selected_lines(
         Path(manifest["input_path"]), Path(output_paths["filtered"]), accepted
     )
@@ -704,6 +743,7 @@ def _finalize(manifest: dict[str, Any], state: list[dict[str, Any]]) -> int:
         "filtered_file": output_paths["filtered"],
         "summary_file": output_paths["summary"],
     }
+    _semantic_report(f"write summary path={output_paths['summary']}")
     atomic_write_yaml(output_paths["summary"], summary)
     manifest["status"] = "complete"
     manifest["completed_at"] = _now()
@@ -714,6 +754,11 @@ def _finalize(manifest: dict[str, Any], state: list[dict[str, Any]]) -> int:
         "retry_exhausted": summary["retry_exhausted"],
     }
     _save_manifest(manifest)
+    counts = " ".join(
+        f"{decision}={decision_counts[decision]}"
+        for decision in ("ACCEPT", "REJECT", "UNCERTAIN", "ERROR")
+    )
+    _semantic_report(f"complete {counts}")
     return 0
 
 
