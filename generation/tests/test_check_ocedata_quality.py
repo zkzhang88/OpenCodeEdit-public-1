@@ -17,10 +17,16 @@ from generation.check_ocedata_quality import (
 
 PRE = "code_before_purify"
 POST = "code_after_purify"
+INSTRUCTION = "instruct_purify"
+VALID_INSTRUCTION = "Update the code."
+
+
+def with_instruction(record):
+    return {INSTRUCTION: VALID_INSTRUCTION, **record}
 
 
 def issue_codes(record):
-    issues, _ = inspect_pair(record, PRE, POST)
+    issues, _ = inspect_pair(with_instruction(record), PRE, POST)
     return [issue["code"] for issue in issues]
 
 
@@ -40,13 +46,19 @@ def outer(arg):
     def test_existing_external_name_is_not_new(self):
         before = "result = framework_value()\n"
         after = "result = framework_value()\nprint(result)\n"
-        issues, _ = inspect_pair({PRE: before, POST: after}, PRE, POST)
+        issues, _ = inspect_pair(
+            with_instruction({PRE: before, POST: after}), PRE, POST
+        )
         self.assertIn("undefined_name", [item["code"] for item in issues])
         self.assertNotIn("new_undefined_name", [item["code"] for item in issues])
 
     def test_new_undefined_name(self):
         issues, _ = inspect_pair(
-            {PRE: "value = 1\n", POST: "value = missing_name()\n"}, PRE, POST
+            with_instruction(
+                {PRE: "value = 1\n", POST: "value = missing_name()\n"}
+            ),
+            PRE,
+            POST,
         )
         codes = [item["code"] for item in issues]
         self.assertIn("undefined_name", codes)
@@ -55,7 +67,9 @@ def outer(arg):
     def test_removed_definition_becomes_unresolvable(self):
         before = "def helper():\n    return 1\nresult = helper()\n"
         after = "result = helper()\n"
-        issues, _ = inspect_pair({PRE: before, POST: after}, PRE, POST)
+        issues, _ = inspect_pair(
+            with_instruction({PRE: before, POST: after}), PRE, POST
+        )
         codes = [issue["code"] for issue in issues]
         self.assertIn("unresolvable_reference", codes)
         self.assertIn("new_unresolvable_reference", codes)
@@ -80,7 +94,9 @@ def outer(arg):
     def test_definition_added_by_post_does_not_reverse_pre_issue_direction(self):
         before = "result = parse_article(url)\n"
         after = "def parse_article(url):\n    return url\nresult = parse_article(url)\n"
-        issues, _ = inspect_pair({PRE: before, POST: after}, PRE, POST)
+        issues, _ = inspect_pair(
+            with_instruction({PRE: before, POST: after}), PRE, POST
+        )
         pre_name_issues = [
             issue
             for issue in issues
@@ -97,7 +113,11 @@ def outer(arg):
         ]
         for before in cases:
             with self.subTest(before=before):
-                issues, _ = inspect_pair({PRE: before, POST: "value = 1\n"}, PRE, POST)
+                issues, _ = inspect_pair(
+                    with_instruction({PRE: before, POST: "value = 1\n"}),
+                    PRE,
+                    POST,
+                )
                 self.assertEqual(issues, [])
 
     def test_removed_import_and_stdlib_module_are_missing_imports(self):
@@ -132,13 +152,15 @@ def outer(value):
 class FormatAndParsingTests(unittest.TestCase):
     def test_python2_fallback(self):
         issues, counts = inspect_pair(
-            {PRE: "print 'before'\n", POST: "print 'after'\n"}, PRE, POST
+            with_instruction({PRE: "print 'before'\n", POST: "print 'after'\n"}),
+            PRE,
+            POST,
         )
         self.assertEqual(issues, [])
         self.assertEqual(counts["python2"], 2)
 
     def test_empty_fence_identical_and_incomplete(self):
-        issues, _ = inspect_pair({PRE: "", POST: ""}, PRE, POST)
+        issues, _ = inspect_pair(with_instruction({PRE: "", POST: ""}), PRE, POST)
         codes = [item["code"] for item in issues]
         self.assertEqual(codes.count("empty_code"), 2)
         self.assertIn("identical_code", codes)
@@ -183,7 +205,9 @@ class FormatAndParsingTests(unittest.TestCase):
 
     def test_pre_incomplete_structure_remains_when_post_is_unparseable(self):
         issues, _ = inspect_pair(
-            {PRE: "def broken():\n", POST: "if ready:\n"}, PRE, POST
+            with_instruction({PRE: "def broken():\n", POST: "if ready:\n"}),
+            PRE,
+            POST,
         )
         pre_codes = [
             issue["code"] for issue in issues if issue["side"] == "pre"
@@ -192,7 +216,11 @@ class FormatAndParsingTests(unittest.TestCase):
 
     def test_unparseable_pre_does_not_make_post_issue_new(self):
         issues, _ = inspect_pair(
-            {PRE: "def broken():\n", POST: "result = missing_name()\n"}, PRE, POST
+            with_instruction(
+                {PRE: "def broken():\n", POST: "result = missing_name()\n"}
+            ),
+            PRE,
+            POST,
         )
         codes = [issue["code"] for issue in issues]
         pre_codes = [
@@ -224,6 +252,31 @@ class FormatAndParsingTests(unittest.TestCase):
         self.assertIn("invalid_field_type", codes)
         self.assertIn("missing_field", codes)
 
+    def test_instruction_must_be_present_nonempty_string(self):
+        code_fields = {PRE: "value = 1\n", POST: "value = 2\n"}
+        cases = [
+            ({}, "missing_field"),
+            ({INSTRUCTION: 3}, "invalid_field_type"),
+            ({INSTRUCTION: ""}, "empty_instruction"),
+            ({INSTRUCTION: " \n\t"}, "empty_instruction"),
+        ]
+        for instruction_fields, expected_code in cases:
+            with self.subTest(instruction_fields=instruction_fields):
+                issues, _ = inspect_pair(
+                    {**code_fields, **instruction_fields}, PRE, POST
+                )
+                instruction_issues = [
+                    issue for issue in issues if issue["side"] == "instruction"
+                ]
+                self.assertEqual(
+                    [issue["code"] for issue in instruction_issues],
+                    [expected_code],
+                )
+                self.assertEqual(instruction_issues[0]["field"], INSTRUCTION)
+
+        issues, _ = inspect_pair(with_instruction(code_fields), PRE, POST)
+        self.assertEqual(issues, [])
+
 
 class JsonlIntegrationTests(unittest.TestCase):
     def test_outputs_counts_and_exit_codes(self):
@@ -233,8 +286,12 @@ class JsonlIntegrationTests(unittest.TestCase):
             report = root / "issues.jsonl"
             filtered = root / "filtered.jsonl"
             summary_file = root / "summary.yaml"
-            valid = {PRE: "x = 1\n", POST: "x = 2\n", "commit": "good"}
-            invalid = {PRE: "x = 1\n", POST: "x = missing\n", "commit": "bad"}
+            valid = with_instruction(
+                {PRE: "x = 1\n", POST: "x = 2\n", "commit": "good"}
+            )
+            invalid = with_instruction(
+                {PRE: "x = 1\n", POST: "x = missing\n", "commit": "bad"}
+            )
             source.write_text(
                 json.dumps(valid) + "\n"
                 + "{not json}\n"
@@ -290,6 +347,57 @@ class JsonlIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 default_summary_data["summary_file"], str(default_summary)
             )
+
+    def test_custom_instruction_field_filters_empty_instructions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.jsonl"
+            report = root / "issues.jsonl"
+            filtered = root / "filtered.jsonl"
+            summary_file = root / "summary.yaml"
+            custom_field = "edit_request"
+            valid = {
+                PRE: "value = 1\n",
+                POST: "value = 2\n",
+                custom_field: "Increment the value.",
+                "commit": "good",
+            }
+            invalid = {
+                PRE: "value = 1\n",
+                POST: "value = 2\n",
+                custom_field: " \n",
+                "commit": "bad",
+            }
+            source.write_text(
+                json.dumps(valid) + "\n" + json.dumps(invalid) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                main(
+                    [
+                        "--input-file", str(source),
+                        "--report-file", str(report),
+                        "--filtered-file", str(filtered),
+                        "--summary-file", str(summary_file),
+                        "--instruction-field", custom_field,
+                        "--fail-on-issues",
+                        "--no-progress",
+                    ]
+                ),
+                1,
+            )
+            summary = yaml.safe_load(summary_file.read_text(encoding="utf-8"))
+            self.assertEqual(summary["passed"], 1)
+            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(summary["issue_counts"], {"empty_instruction": 1})
+            self.assertEqual(
+                json.loads(filtered.read_text(encoding="utf-8"))["commit"], "good"
+            )
+            reported = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(reported["commit"], "bad")
+            self.assertEqual(reported["issues"][0]["side"], "instruction")
+            self.assertEqual(reported["issues"][0]["field"], custom_field)
 
     def test_rejects_overlapping_paths(self):
         with tempfile.TemporaryDirectory() as directory:

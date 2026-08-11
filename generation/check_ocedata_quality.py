@@ -666,6 +666,7 @@ def inspect_pair(
     record: Dict[str, object],
     pre_field: str,
     post_field: str,
+    instruction_field: str = "instruct_purify",
 ) -> Tuple[List[Dict[str, object]], Counter]:
     issues: List[Dict[str, object]] = []
     parse_counts: Counter = Counter()
@@ -674,6 +675,36 @@ def inspect_pair(
     parsed_codes: Dict[str, ParsedCode] = {}
     pre_incomplete_issues: List[Dict[str, object]] = []
     post_parse_issues: List[Dict[str, object]] = []
+
+    if instruction_field not in record:
+        issues.append(
+            make_issue(
+                "missing_field",
+                "instruction",
+                instruction_field,
+                f"Required field '{instruction_field}' is missing",
+            )
+        )
+    else:
+        instruction = record[instruction_field]
+        if not isinstance(instruction, str):
+            issues.append(
+                make_issue(
+                    "invalid_field_type",
+                    "instruction",
+                    instruction_field,
+                    f"Expected a string, got {type(instruction).__name__}",
+                )
+            )
+        elif not instruction.strip():
+            issues.append(
+                make_issue(
+                    "empty_instruction",
+                    "instruction",
+                    instruction_field,
+                    "Edit instruction is empty",
+                )
+            )
 
     # Parse both sides so pre-edit can serve as a silent comparison baseline,
     # but defer pre-edit truncation findings until post-edit has been parsed.
@@ -809,6 +840,7 @@ def check_jsonl(
     post_field: str = "code_after_purify",
     show_progress: bool = True,
     summary_file: Optional[Path] = None,
+    instruction_field: str = "instruct_purify",
 ) -> Dict[str, object]:
     """Check JSONL and atomically write issue, filtered, and summary outputs."""
     _validate_paths(input_file, report_file, filtered_file, summary_file)
@@ -848,7 +880,7 @@ def check_jsonl(
                         )
                     record = loaded
                     issues, row_parse_counts = inspect_pair(
-                        record, pre_field, post_field
+                        record, pre_field, post_field, instruction_field
                     )
                     parse_counts.update(row_parse_counts)
                 except (json.JSONDecodeError, TypeError) as exc:
@@ -981,7 +1013,10 @@ def default_summary_path(input_file: Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Statically check pre-edit and post-edit Python in OCEData."
+        description=(
+            "Statically check edit instructions and pre-edit/post-edit Python "
+            "in OCEData."
+        )
     )
     parser.add_argument("--input-file", type=Path, default=DEFAULT_INPUT)
     parser.add_argument(
@@ -1004,6 +1039,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pre-field", default="code_before_purify")
     parser.add_argument("--post-field", default="code_after_purify")
+    parser.add_argument("--instruction-field", default="instruct_purify")
     parser.add_argument(
         "--fail-on-issues",
         action="store_true",
@@ -1034,6 +1070,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             summary_file=summary_file,
             pre_field=args.pre_field,
             post_field=args.post_field,
+            instruction_field=args.instruction_field,
             show_progress=not args.no_progress,
         )
     except (OSError, ValueError) as exc:
