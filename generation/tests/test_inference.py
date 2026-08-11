@@ -50,6 +50,43 @@ class FakeApiClient:
         self.chat = SimpleNamespace(completions=FakeApiCompletions())
 
 
+class RecordingProgress:
+    def __init__(self, **kwargs):
+        self.options = kwargs
+        self.updates = []
+        self.postfixes = []
+        self.messages = []
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.closed = True
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        del refresh
+        values = dict(ordered_dict or {})
+        values.update(kwargs)
+        self.postfixes.append(values)
+
+    def update(self, amount):
+        self.updates.append(amount)
+
+    def write(self, message, file=None):
+        self.messages.append((message, file))
+
+
+class RecordingProgressFactory:
+    def __init__(self):
+        self.bars = []
+
+    def __call__(self, **kwargs):
+        progress = RecordingProgress(**kwargs)
+        self.bars.append(progress)
+        return progress
+
+
 class FakeSiliconFlowFiles:
     def __init__(self):
         self.inputs = {}
@@ -206,7 +243,11 @@ class InferenceTests(unittest.TestCase):
 
     def test_api_executor_completes_two_rounds_and_sorts_final_output(self):
         fake_client = FakeApiClient()
-        executor = RealtimeApiExecutor(client_factory=lambda **kwargs: fake_client)
+        progress = RecordingProgressFactory()
+        executor = RealtimeApiExecutor(
+            client_factory=lambda **kwargs: fake_client,
+            progress_factory=progress,
+        )
         result = create_run(
             executor="api",
             model="test-api",
@@ -223,6 +264,14 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(output[0]["executor"], "api")
         self.assertEqual(show_status(self.run_dir)["status"], "complete")
         self.assertNotIn("secret", (self.run_dir / "manifest.yaml").read_text())
+        self.assertEqual(len(progress.bars), 2)
+        for round_index, bar in enumerate(progress.bars, start=1):
+            self.assertEqual(bar.options["desc"], f"API round {round_index} attempt 1")
+            self.assertEqual(bar.options["total"], 2)
+            self.assertEqual(bar.options["initial"], 0)
+            self.assertEqual(bar.updates, [1, 1])
+            self.assertEqual(bar.postfixes[-1], {"success": 2, "failed": 0})
+            self.assertTrue(bar.closed)
 
     def test_api_resume_reuses_attempt_and_only_requests_missing_tasks(self):
         class InterruptingCompletions:
@@ -251,6 +300,7 @@ class InferenceTests(unittest.TestCase):
         first_client = SimpleNamespace(
             chat=SimpleNamespace(completions=first_completions)
         )
+        first_progress = RecordingProgressFactory()
         result = create_run(
             executor="api",
             model="test-api",
@@ -259,7 +309,8 @@ class InferenceTests(unittest.TestCase):
             output_path=self.output_path,
             run_dir=self.run_dir,
             executor_instance=RealtimeApiExecutor(
-                client_factory=lambda **kwargs: first_client
+                client_factory=lambda **kwargs: first_client,
+                progress_factory=first_progress,
             ),
         )
         self.assertEqual(result, 130)
@@ -267,12 +318,16 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(status["status"], "interrupted")
         self.assertEqual(status["rounds"][0]["active_attempt"], 1)
         self.assertEqual(status["rounds"][0]["attempts_used"], 1)
+        self.assertEqual(first_progress.bars[0].updates, [1])
+        self.assertTrue(first_progress.bars[0].closed)
 
         recovery_client = FakeApiClient()
+        recovery_progress = RecordingProgressFactory()
         result = resume_run(
             self.run_dir,
             executor_instance=RealtimeApiExecutor(
-                client_factory=lambda **kwargs: recovery_client
+                client_factory=lambda **kwargs: recovery_client,
+                progress_factory=recovery_progress,
             ),
         )
         self.assertEqual(result, 0)
@@ -291,6 +346,55 @@ class InferenceTests(unittest.TestCase):
                 .splitlines()
             ),
             2,
+        )
+        self.assertEqual(len(recovery_progress.bars), 1)
+        resumed_bar = recovery_progress.bars[0]
+        self.assertEqual(resumed_bar.options["total"], 2)
+        self.assertEqual(resumed_bar.options["initial"], 1)
+        self.assertEqual(resumed_bar.updates, [1])
+        self.assertEqual(resumed_bar.postfixes[-1], {"success": 2, "failed": 0})
+
+    def test_api_progress_reports_failed_task_and_new_transport_attempt(self):
+        class FailingOnceCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary outage")
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+                )
+
+        write_jsonl(self.input_path, [dict(self.prompts[0], user=["only-round"])])
+        completions = FailingOnceCompletions()
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        progress = RecordingProgressFactory()
+        result = create_run(
+            executor="api",
+            model="test-api",
+            config_path=self.config_path,
+            input_path=self.input_path,
+            output_path=self.output_path,
+            run_dir=self.run_dir,
+            executor_instance=RealtimeApiExecutor(
+                client_factory=lambda **kwargs: client,
+                progress_factory=progress,
+            ),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(progress.bars), 2)
+        self.assertEqual(
+            progress.bars[0].postfixes[-1], {"success": 0, "failed": 1}
+        )
+        self.assertIn(
+            "task 2:1 failed: RuntimeError: temporary outage",
+            progress.bars[0].messages[0][0],
+        )
+        self.assertEqual(
+            progress.bars[1].postfixes[-1], {"success": 1, "failed": 0}
         )
 
     def test_mixed_single_and_multi_round_prompts_are_supported(self):

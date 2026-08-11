@@ -109,6 +109,41 @@ class FakeApiClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
+class RecordingProgress:
+    def __init__(self, **kwargs):
+        self.options = kwargs
+        self.updates = []
+        self.postfixes = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        del refresh
+        values = dict(ordered_dict or {})
+        values.update(kwargs)
+        self.postfixes.append(values)
+
+    def update(self, amount):
+        self.updates.append(amount)
+
+    def write(self, message, file=None):
+        pass
+
+
+class RecordingProgressFactory:
+    def __init__(self):
+        self.bars = []
+
+    def __call__(self, **kwargs):
+        progress = RecordingProgress(**kwargs)
+        self.bars.append(progress)
+        return progress
+
+
 class FakeSiliconFlowFiles:
     def __init__(self, payload: dict):
         self.payload = payload
@@ -287,9 +322,12 @@ class SemanticWorkflowTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def api_run(self, responses: list[object], **overrides):
+    def api_run(self, responses: list[object], progress_factory=None, **overrides):
         client = FakeApiClient(responses)
-        executor = RealtimeApiExecutor(client_factory=lambda **kwargs: client)
+        executor = RealtimeApiExecutor(
+            client_factory=lambda **kwargs: client,
+            progress_factory=progress_factory,
+        )
         arguments = {
             "executor": "api",
             "model": "test-api",
@@ -303,13 +341,14 @@ class SemanticWorkflowTests(unittest.TestCase):
         return result, client, executor
 
     def test_api_selective_retry_decisions_and_fresh_context(self):
+        progress = RecordingProgressFactory()
         responses = [
             "not json",
             check_payload(post="FAIL"),
             check_payload(),
             check_payload(pre="UNCERTAIN"),
         ]
-        result, client, _ = self.api_run(responses)
+        result, client, _ = self.api_run(responses, progress_factory=progress)
         self.assertEqual(result, 0)
         results_path = self.input_path.with_name(
             "static_filtered_semantic_results.jsonl"
@@ -344,6 +383,13 @@ class SemanticWorkflowTests(unittest.TestCase):
         self.assertEqual(summary["retried_samples"], 1)
         self.assertEqual(summary["token_usage"]["total_tokens"], 60)
         self.assertEqual(semantic_status(self.run_dir)["status"], "complete")
+        self.assertEqual([bar.options["total"] for bar in progress.bars], [3, 1])
+        self.assertEqual([bar.options["initial"] for bar in progress.bars], [0, 0])
+        self.assertEqual([bar.updates for bar in progress.bars], [[1, 1, 1], [1]])
+        self.assertEqual(
+            [bar.postfixes[-1] for bar in progress.bars],
+            [{"success": 3, "failed": 0}, {"success": 1, "failed": 0}],
+        )
 
     def test_invalid_response_retries_twice_then_becomes_error(self):
         write_jsonl(self.input_path, self.records[:1])

@@ -64,6 +64,12 @@ python generation/inference.py run \
   --run-dir generation/data/runs/qwen3_api
 ```
 
+Direct API inference writes a `tqdm` progress bar to stderr for every round and
+transport attempt. The bar reports processed requests, speed, ETA, and success
+and failure counts. Failed requests also print their task ID and error summary;
+their model responses are never printed. Resuming an interrupted attempt starts
+the bar at the number of request records already saved on disk.
+
 For SiliconFlow, `run` uploads and submits the first round, records every file
 and job ID in the run manifest, and then exits by default:
 

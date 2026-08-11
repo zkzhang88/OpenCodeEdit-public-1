@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 from typing import Any, Callable
+
+from tqdm import tqdm
 
 from .batch import (
     build_batch_request,
@@ -66,8 +69,13 @@ def save_successes(path: str | Path, successes: list[dict[str, Any]]) -> None:
 
 
 class RealtimeApiExecutor:
-    def __init__(self, client_factory: Callable[..., Any] | None = None):
+    def __init__(
+        self,
+        client_factory: Callable[..., Any] | None = None,
+        progress_factory: Callable[..., Any] | None = None,
+    ):
         self.client_factory = client_factory
+        self.progress_factory = progress_factory or tqdm
 
     def advance_round(
         self,
@@ -179,52 +187,90 @@ class RealtimeApiExecutor:
                     timeout=config["executor_config"].get("request_timeout", 600),
                     max_retries=config["executor_config"].get("request_retries", 5),
                 )
-                for task_id in active["expected_task_ids"]:
-                    if task_id not in missing_ids:
-                        continue
-                    task = task_by_id[task_id]
-                    try:
-                        completion = client.chat.completions.create(
-                            model=config["executor_config"]["model"],
-                            messages=round_messages(
-                                task, round_state["round"], prior_by_task[task_id]
-                            ),
-                            **config["sampling"],
-                            extra_body=config["executor_config"].get(
-                                "extra_body", {}
-                            ),
-                        )
-                        content = completion.choices[0].message.content
-                        if not isinstance(content, str) or not content.strip():
-                            raise InferenceError(
-                                "response has no non-empty assistant content"
+                success_count = sum(
+                    record["status"] == "success" for record in records.values()
+                )
+                failure_count = len(records) - success_count
+                description = (
+                    f"API round {round_state['round']} attempt {active['attempt']}"
+                )
+                with self.progress_factory(
+                    total=len(expected_ids),
+                    initial=len(records),
+                    desc=description,
+                    unit="request",
+                    dynamic_ncols=True,
+                    file=sys.stderr,
+                ) as progress:
+                    progress.set_postfix(
+                        success=success_count, failed=failure_count, refresh=False
+                    )
+                    for task_id in active["expected_task_ids"]:
+                        if task_id not in missing_ids:
+                            continue
+                        task = task_by_id[task_id]
+                        try:
+                            completion = client.chat.completions.create(
+                                model=config["executor_config"]["model"],
+                                messages=round_messages(
+                                    task,
+                                    round_state["round"],
+                                    prior_by_task[task_id],
+                                ),
+                                **config["sampling"],
+                                extra_body=config["executor_config"].get(
+                                    "extra_body", {}
+                                ),
                             )
-                        raw_response = (
-                            completion.model_dump(mode="json")
-                            if hasattr(completion, "model_dump")
-                            else None
+                            content = completion.choices[0].message.content
+                            if not isinstance(content, str) or not content.strip():
+                                raise InferenceError(
+                                    "response has no non-empty assistant content"
+                                )
+                            raw_response = (
+                                completion.model_dump(mode="json")
+                                if hasattr(completion, "model_dump")
+                                else None
+                            )
+                            attempt_record = {
+                                "task_id": task_id,
+                                "round": round_state["round"],
+                                "status": "success",
+                                "content": content,
+                                "raw_response": raw_response,
+                            }
+                            success_count += 1
+                        except KeyboardInterrupt:
+                            raise
+                        except Exception as error:  # one task must not discard the attempt
+                            error_message = f"{type(error).__name__}: {error}"
+                            attempt_record = {
+                                "task_id": task_id,
+                                "round": round_state["round"],
+                                "status": "error",
+                                "error": error_message,
+                            }
+                            failure_count += 1
+                            progress.set_postfix(
+                                success=success_count,
+                                failed=failure_count,
+                                refresh=False,
+                            )
+                            progress.write(
+                                f"{description} task {task_id} failed: {error_message}",
+                                file=sys.stderr,
+                            )
+                        append_jsonl(attempt_path, attempt_record)
+                        if attempt_record["status"] == "success":
+                            self._merge_api_successes(
+                                results_path, {task_id: attempt_record}
+                            )
+                        progress.set_postfix(
+                            success=success_count,
+                            failed=failure_count,
+                            refresh=False,
                         )
-                        attempt_record = {
-                            "task_id": task_id,
-                            "round": round_state["round"],
-                            "status": "success",
-                            "content": content,
-                            "raw_response": raw_response,
-                        }
-                    except KeyboardInterrupt:
-                        raise
-                    except Exception as error:  # one task must not discard the attempt
-                        attempt_record = {
-                            "task_id": task_id,
-                            "round": round_state["round"],
-                            "status": "error",
-                            "error": f"{type(error).__name__}: {error}",
-                        }
-                    append_jsonl(attempt_path, attempt_record)
-                    if attempt_record["status"] == "success":
-                        self._merge_api_successes(
-                            results_path, {task_id: attempt_record}
-                        )
+                        progress.update(1)
             except KeyboardInterrupt:
                 round_state["status"] = "interrupted"
                 round_state["last_exit_code"] = 130
