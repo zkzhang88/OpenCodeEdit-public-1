@@ -304,46 +304,90 @@ are written below type-named directories such as
 
 ## LLM Semantic Quality Check
 
-After the static quality check, run the semantic checker on its filtered JSONL:
+After the static quality check, run the semantic checker on its filtered JSONL.
+The semantic workflow uses the same model profiles and executors as
+`inference.py`, while keeping its own run directory and semantic retry state.
+
+Run with an OpenAI-compatible API:
 
 ```bash
-python3 generation/semantic_check_api.py \
-  --input-file data/OCEData/ocedata_quality_filtered.jsonl \
-  --model-name qwen3-32b
+python generation/semantic_check.py run \
+  --executor api \
+  --model qwen3-32b \
+  --config generation/inference_config.yaml \
+  --input generation/data/OCEData/ocedata_quality_filtered.jsonl \
+  --run-dir generation/data/runs/semantic_qwen3_api
 ```
 
-Use `--model-name deepseek-v3` to check with the configured DeepSeek model.
-The selected model checks every input record, regardless of its `instr_type`.
-API endpoints, keys, and actual provider model names come from
-`generation/api_config.yaml`. The fixed prompts are defined in
-`generation/prompts_for_check.py`; every record is sent in a fresh system/user
-context with no generation history.
+Run through SiliconFlow Batch Inference. Without `--wait`, the initial command
+submits the current semantic attempt and returns:
+
+```bash
+python generation/semantic_check.py run \
+  --executor siliconflow-batch \
+  --model deepseek-v3 \
+  --config generation/inference_config.yaml \
+  --input generation/data/OCEData/ocedata_quality_filtered.jsonl \
+  --run-dir generation/data/runs/semantic_deepseek_batch
+
+python generation/semantic_check.py continue \
+  --run-dir generation/data/runs/semantic_deepseek_batch \
+  --wait
+```
+
+Run with the local `llm-infer` Batch executor:
+
+```bash
+python generation/semantic_check.py run \
+  --executor llm-infer \
+  --model local-qwen3 \
+  --config generation/inference_config.yaml \
+  --input generation/data/OCEData/ocedata_quality_filtered.jsonl \
+  --run-dir generation/data/runs/semantic_qwen3_local
+```
+
+The selected model checks every input record regardless of `instr_type`. Fixed
+prompts come from `generation/prompts_for_check.py`. Every initial request and
+semantic retry contains only a fresh system/user context, with no generation
+history or previous invalid response. Semantic checks force one completion and
+default to `temperature=0`, `top_p=1`, and `max_tokens=1200`.
+
+Malformed semantic JSON, schema violations, and truncated responses retry only
+the affected samples. The default `--semantic-retries 2` permits two additional
+requests after the first response. A sample that still fails validation is
+recorded as `ERROR`. Valid `FAIL` and `UNCERTAIN` verdicts are final and do not
+retry. Transport and Batch task failures use the independent
+`max_batch_attempts` budget from the inference configuration.
 
 The default outputs are created beside the input:
 
-- `<input_stem>_semantic_results.jsonl`: one current result per input line;
+- `<input_stem>_semantic_results.jsonl`: one result and retry history per input;
 - `<input_stem>_semantic_filtered.jsonl`: original records whose three verdicts
   are all `PASS`;
-- `<input_stem>_semantic_summary.yaml`: decision, verdict, and token counts;
-- result state and progress JSON files used for safe recovery.
+- `<input_stem>_semantic_summary.yaml`: decision, verdict, retry, and token
+  counts.
 
 `FAIL`, `UNCERTAIN`, and `ERROR` records are excluded from the filtered output.
-API errors and malformed model responses are retried and then recorded as
-`ERROR` without stopping the remaining work. Resume an interrupted run, or
-retry its `ERROR` records, with the same arguments plus:
+The run directory contains the semantic manifest, per-sample state, and a
+separate inference sub-run for every semantic attempt. Inspect it without
+changing state:
 
 ```bash
-python3 generation/semantic_check_api.py \
-  --input-file data/OCEData/ocedata_quality_filtered.jsonl \
-  --model-name qwen3-32b \
-  --continue-from-error
+python generation/semantic_check.py status \
+  --run-dir generation/data/runs/semantic_qwen3_api
 ```
 
-Use `--workers` to opt into concurrent requests. Output paths and input field
-names can be overridden with `--result-file`, `--filtered-file`,
-`--summary-file`, `--pre-field`, `--post-field`, and `--instruction-field`.
-Use distinct output paths when checking the same input independently with both
-models.
+Resume an interrupted API or local attempt with `resume`. Use `continue` for a
+submitted SiliconFlow attempt. If the current inference sub-run exhausts its
+transport attempt budget, correct the external issue and use `retry` to grant a
+new budget. Once the active inference attempt completes, each command
+automatically validates its responses, launches selective semantic retries when
+needed, and writes the final outputs when all samples are resolved.
+
+Output paths and input field names can be overridden with `--result-file`,
+`--filtered-file`, `--summary-file`, `--pre-field`, `--post-field`, and
+`--instruction-field`. The original input and prompt templates must not change
+during a run.
 
 
 ## Finetune dataset construction
