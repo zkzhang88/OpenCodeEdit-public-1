@@ -304,36 +304,80 @@ are written below type-named directories such as
 `ocedataft_quality_filtered_samples/ds_descriptive/line_NNNNNN/`.
 
 
+## Split Instruction Variants
+
+Static-quality output keeps both purified instruction variants on each code
+pair. Before semantic checking, split it into independent descriptive and lazy
+datasets:
+
+The quality pipeline is: run the static check, split the two instruction
+variants, run descriptive semantic checking, run lazy semantic checking, then
+send each variant's filtered output to its corresponding downstream pipeline.
+
+```bash
+python generation/split_instructions.py \
+  --input-file generation/data/triplets_ds_quality_filtered.jsonl \
+  --model-name ds
+```
+
+This creates, by default:
+
+- `generation/data/triplets_ds_quality_filtered_descriptive.jsonl`;
+- `generation/data/triplets_ds_quality_filtered_lazy.jsonl`.
+
+Every source record is copied to both outputs in its original order. All source
+fields are preserved, while `instruct_purify` is set to the selected variant
+and `instr_type` is set to `ds_descriptive` or `ds_lazy`. Use
+`--model-name qwen3` for Qwen-generated triplets. The model name is required
+because it records the data source; it does not select the model used for
+semantic inference.
+
+Both source instruction fields must be non-empty strings. The splitter fully
+validates the input before publishing either output, refuses to overwrite
+existing files, and uses adjacent temporary files for atomic completion. Use
+`--descriptive-file`, `--lazy-file`, `--descriptive-field`, and `--lazy-field`
+to override the default paths or source fields.
+
+
 ## LLM Semantic Quality Check
 
-After the static quality check, run the semantic checker on its filtered JSONL.
-The semantic workflow uses the same model profiles and executors as
-`inference.py`, while keeping its own run directory and semantic retry state.
+Run the semantic checker separately on the two split JSONL files. Each variant
+has an independent run directory, retry state, decisions, and filtered output;
+a code pair may therefore pass one instruction variant and fail the other. The
+semantic workflow uses the same model profiles and executors as `inference.py`.
 
-Run with an OpenAI-compatible API:
+For example, check both DeepSeek-generated variants with an OpenAI-compatible
+API:
 
 ```bash
 python generation/semantic_check.py run \
   --executor api \
-  --model qwen3-32b \
+  --model deepseek-v3 \
   --config generation/inference_config.yaml \
-  --input generation/data/OCEData/ocedata_quality_filtered.jsonl \
-  --run-dir generation/data/runs/semantic_qwen3_api
+  --input generation/data/triplets_ds_quality_filtered_descriptive.jsonl \
+  --run-dir generation/data/runs/semantic_ds_descriptive_api
+
+python generation/semantic_check.py run \
+  --executor api \
+  --model deepseek-v3 \
+  --config generation/inference_config.yaml \
+  --input generation/data/triplets_ds_quality_filtered_lazy.jsonl \
+  --run-dir generation/data/runs/semantic_ds_lazy_api
 ```
 
 Run through SiliconFlow Batch Inference. Without `--wait`, the initial command
-submits the current semantic attempt and returns:
+submits one variant's current semantic attempt and returns:
 
 ```bash
 python generation/semantic_check.py run \
   --executor siliconflow-batch \
   --model deepseek-v3 \
   --config generation/inference_config.yaml \
-  --input generation/data/OCEData/ocedata_quality_filtered.jsonl \
-  --run-dir generation/data/runs/semantic_deepseek_batch
+  --input generation/data/triplets_ds_quality_filtered_descriptive.jsonl \
+  --run-dir generation/data/runs/semantic_ds_descriptive_batch
 
 python generation/semantic_check.py continue \
-  --run-dir generation/data/runs/semantic_deepseek_batch \
+  --run-dir generation/data/runs/semantic_ds_descriptive_batch \
   --wait
 ```
 
@@ -344,8 +388,8 @@ python generation/semantic_check.py run \
   --executor llm-infer \
   --model local-qwen3 \
   --config generation/inference_config.yaml \
-  --input generation/data/OCEData/ocedata_quality_filtered.jsonl \
-  --run-dir generation/data/runs/semantic_qwen3_local
+  --input generation/data/triplets_qwen3_quality_filtered_lazy.jsonl \
+  --run-dir generation/data/runs/semantic_qwen3_lazy_local
 ```
 
 The selected model checks every input record regardless of `instr_type`. Fixed
@@ -376,7 +420,7 @@ changing state:
 
 ```bash
 python generation/semantic_check.py status \
-  --run-dir generation/data/runs/semantic_qwen3_api
+  --run-dir generation/data/runs/semantic_ds_descriptive_api
 ```
 
 Resume an interrupted API or local attempt with `resume`. Use `continue` for a
@@ -389,7 +433,8 @@ needed, and writes the final outputs when all samples are resolved.
 Output paths and input field names can be overridden with `--result-file`,
 `--filtered-file`, `--summary-file`, `--pre-field`, `--post-field`, and
 `--instruction-field`. The original input and prompt templates must not change
-during a run.
+during a run. Feed the descriptive and lazy semantic filtered files into their
+respective downstream pipelines; do not intersect or union their decisions.
 
 
 ## Finetune dataset construction
