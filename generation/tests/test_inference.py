@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,7 @@ class RecordingProgressFactory:
 class FakeSiliconFlowFiles:
     def __init__(self):
         self.inputs = {}
+        self.content_calls = []
 
     def create(self, file, purpose):
         assert purpose == "batch"
@@ -97,8 +99,7 @@ class FakeSiliconFlowFiles:
         self.inputs[file_id] = file.read().decode("utf-8")
         return SimpleNamespace(id=file_id)
 
-    def content(self, output_file_id):
-        input_file_id = output_file_id.removeprefix("output-")
+    def output_bytes(self, input_file_id):
         requests = [
             json.loads(line) for line in self.inputs[input_file_id].splitlines()
         ]
@@ -126,8 +127,12 @@ class FakeSiliconFlowFiles:
                     "error": None,
                 }
             )
-        data = "".join(json.dumps(item) + "\n" for item in results).encode()
-        return SimpleNamespace(content=data)
+        return "".join(json.dumps(item) + "\n" for item in results).encode()
+
+    def content(self, output_file_id):
+        self.content_calls.append(output_file_id)
+        input_file_id = output_file_id.removeprefix("output-")
+        return SimpleNamespace(content=self.output_bytes(input_file_id))
 
 
 class FakeSiliconFlowBatches:
@@ -167,6 +172,17 @@ class SequencedSiliconFlowBatches(FakeSiliconFlowBatches):
             id=job_id,
             status=status,
             output_file_id=f"output-{file_id}" if status == "completed" else None,
+            error_file_id=None,
+        )
+
+
+class UrlSiliconFlowBatches(FakeSiliconFlowBatches):
+    def retrieve(self, job_id):
+        file_id = self.jobs[job_id]
+        return SimpleNamespace(
+            id=job_id,
+            status="completed",
+            output_file_id=f"https://downloads.invalid/{file_id}.jsonl",
             error_file_id=None,
         )
 
@@ -472,6 +488,49 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual([record["task_id"] for record in output], ["1:1", "2:1"])
         self.assertEqual(output[0]["response"], ["remote:first-1", "remote:second-1"])
         self.assertEqual(len(fake_client.batches.jobs), 2)
+
+    def test_siliconflow_downloads_url_output_without_files_api(self):
+        fake_client = FakeSiliconFlowClient()
+        fake_client.batches = UrlSiliconFlowBatches()
+        downloads = []
+
+        def open_url(url, timeout):
+            downloads.append((url, timeout))
+            file_name = url.rsplit("/", 1)[-1]
+            file_id = file_name.removesuffix(".jsonl")
+            return io.BytesIO(fake_client.files.output_bytes(file_id))
+
+        executor = SiliconFlowBatchExecutor(
+            client_factory=lambda **kwargs: fake_client,
+            sleeper=lambda seconds: None,
+            url_opener=open_url,
+        )
+        self.assertEqual(
+            create_run(
+                executor="siliconflow-batch",
+                model="test-sf",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                wait=False,
+                executor_instance=executor,
+            ),
+            0,
+        )
+        self.assertEqual(
+            continue_run(self.run_dir, wait=True, executor_instance=executor),
+            0,
+        )
+
+        output = [json.loads(line) for line in self.output_path.read_text().splitlines()]
+        self.assertEqual([record["task_id"] for record in output], ["1:1", "2:1"])
+        self.assertEqual(len(downloads), 2)
+        self.assertTrue(
+            all(url.startswith("https://downloads.invalid/") for url, _ in downloads)
+        )
+        self.assertTrue(all(timeout == 600 for _, timeout in downloads))
+        self.assertEqual(fake_client.files.content_calls, [])
 
     def test_siliconflow_continue_reports_each_poll_and_persists_count(self):
         write_jsonl(

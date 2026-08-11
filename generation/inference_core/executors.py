@@ -6,8 +6,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Callable
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from tqdm import tqdm
 
@@ -562,10 +565,12 @@ class SiliconFlowBatchExecutor:
         client_factory: Callable[..., Any] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         poll_reporter: Callable[[str], None] | None = None,
+        url_opener: Callable[..., Any] | None = None,
     ):
         self.client_factory = client_factory
         self.sleeper = sleeper
         self.poll_reporter = poll_reporter or _stderr_report
+        self.url_opener = url_opener or urlopen
 
     def _client(self, config: dict[str, Any]) -> Any:
         api_key, base_url = load_credentials(config)
@@ -577,9 +582,15 @@ class SiliconFlowBatchExecutor:
             factory = self.client_factory
         return factory(api_key=api_key, base_url=base_url)
 
-    @staticmethod
-    def _write_remote_content(client: Any, file_id: str, path: Path) -> None:
-        response = client.files.content(file_id)
+    def _write_remote_content(
+        self, client: Any, remote_file: str, path: Path
+    ) -> None:
+        scheme = urlsplit(remote_file).scheme.lower()
+        if scheme in {"http", "https"}:
+            self._write_url_content(remote_file, path)
+            return
+
+        response = client.files.content(remote_file)
         content = _value(response, "content")
         if isinstance(content, str):
             data = content.encode("utf-8")
@@ -591,8 +602,37 @@ class SiliconFlowBatchExecutor:
             response.write_to_file(path)
             return
         else:
-            raise InferenceError(f"Cannot read remote output file {file_id}")
+            raise InferenceError(f"Cannot read remote output file {remote_file}")
         path.write_bytes(data)
+
+    def _write_url_content(self, url: str, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".download.tmp",
+                delete=False,
+            ) as output_file:
+                temporary_path = Path(output_file.name)
+                with self.url_opener(url, timeout=600) as response:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output_file.write(chunk)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            os.replace(temporary_path, path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except FileNotFoundError:
+                    pass
 
     def _submit_attempt(
         self,
