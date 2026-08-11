@@ -14,8 +14,9 @@ def purify_code_from_jsonl(input_file, output_file, purify_field="code_after", p
         purify_fields (list): JSONL field(s) containing the code snippet. Defaults to None. 
         keep_language_mark (bool): If True, retains the language marker as a comment. Defaults to False.
 
-    Raises:
-        ValueError: If no code block or end marker is found.
+    Records are written only when every requested field is present and contains
+    a complete, non-empty code block. Invalid records are dropped with a warning,
+    followed by a summary of total, written, and dropped record counts.
     """
     # Pattern to match ```lang\n<code>``` blocks
     pattern = re.compile(r'```(?P<lang>[^\s`]+)?\s*\n(?P<code>[\s\S]*?)```', re.MULTILINE)
@@ -24,49 +25,78 @@ def purify_code_from_jsonl(input_file, output_file, purify_field="code_after", p
     if purify_fields is None:
         purify_fields = [purify_field]
 
+    total_count = 0
+    written_count = 0
+    dropped_count = 0
     with open(input_file, 'r', encoding='utf-8') as infile, \
          open(output_file, 'w', encoding='utf-8') as outfile:
-        for line in infile:
+        for line_number, line in enumerate(infile, start=1):
+            total_count += 1
             data = json.loads(line)
             out_data = data.copy()
+            failures = []
             for field in purify_fields:
-                if field in data:
-                    snippet = data[field]
-                    try:
-                        matches = list(pattern.finditer(snippet))
-                        if not matches:
-                            raise ValueError('No code block found')
+                if field not in data:
+                    failures.append((field, 'Field is missing'))
+                    continue
 
-                        # Select first non-markdown block if present, else first match
-                        selected = None
-                        for m in matches:
-                            lang = (m.group('lang') or '').lower()
-                            if lang != 'markdown':
-                                selected = m
-                                break
-                        if not selected:
-                            selected = matches[0]  # Fallback to first match, i.e. "markdown"
+                snippet = data[field]
+                if not isinstance(snippet, str):
+                    failures.append(
+                        (field, f'Expected a string, got {type(snippet).__name__}')
+                    )
+                    continue
 
-                        lang = selected.group('lang') or ''
-                        code = selected.group('code').strip()
+                try:
+                    matches = list(pattern.finditer(snippet))
+                    if not matches:
+                        raise ValueError('No complete code block found')
 
-                        # If the extracted 'code' content is empty, raise an exception
-                        if not code:
-                            raise ValueError('Extracted code block is empty')
-                        
-                        if code.startswith("python"):
-                            code = "\n".join(code.split("\n")[1:])
-                            lang = "python"
+                    # Select first non-markdown block if present, else first match
+                    selected = None
+                    for m in matches:
+                        lang = (m.group('lang') or '').lower()
+                        if lang != 'markdown':
+                            selected = m
+                            break
+                    if not selected:
+                        selected = matches[0]  # Fallback to first match, i.e. "markdown"
 
-                        # Optionally retain language marker as comment
-                        if keep_language_mark and lang:
-                            code = f"## {lang}\n" + code
+                    lang = selected.group('lang') or ''
+                    code = selected.group('code').strip()
 
-                        out_data[f'{field}_purify'] = code
-                    except Exception as e:
-                        print(f"Failed to process line: {line.strip()}\nError: {e}")
+                    # If the extracted 'code' content is empty, raise an exception
+                    if not code:
+                        raise ValueError('Extracted code block is empty')
+
+                    if code.startswith("python"):
+                        code = "\n".join(code.split("\n")[1:])
+                        lang = "python"
+
+                    # Optionally retain language marker as comment
+                    if keep_language_mark and lang:
+                        code = f"## {lang}\n" + code
+
+                    out_data[f'{field}_purify'] = code
+                except ValueError as error:
+                    failures.append((field, str(error)))
+
+            if failures:
+                dropped_count += 1
+                for field, reason in failures:
+                    print(
+                        f"Warning: dropping {input_file}:{line_number}; "
+                        f"field {field!r}: {reason}"
+                    )
+                continue
 
             outfile.write(json.dumps(out_data, ensure_ascii=False) + '\n')
+            written_count += 1
+
+    print(
+        "Code purification finished: "
+        f"total={total_count}, written={written_count}, dropped={dropped_count}."
+    )
 
 
 if __name__ == '__main__':

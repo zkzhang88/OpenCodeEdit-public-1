@@ -1,0 +1,58 @@
+# Copy this file to inference_config.yaml and adjust model paths and runtime settings.
+# API credentials remain in api_config.yaml and are never copied into run manifests.
+api_config_path: api_config.yaml
+
+defaults:
+  num_completion: 1
+  max_batch_attempts: 3
+  sampling:
+    temperature: 0.8
+    top_p: 0.95
+    max_tokens: 2048
+
+executors:
+  api:
+    request_timeout: 600
+    request_retries: 5
+  siliconflow-batch:
+    api_key_field: SILICONFLOW_API_KEY
+    base_url_field: SILICONFLOW_BASE_URL
+    completion_window: 24h
+    endpoint: /v1/chat/completions
+    max_requests_per_file: 6000
+    poll_interval: 60
+  llm-infer:
+    conda_executable: conda
+    conda_environment: llm_infer
+    command: batch-infer
+    auto_serve: true
+    models_dir: ~/models
+    concurrency: 32
+    timeout: 600
+    max_retries: 3
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.9
+
+models:
+  qwen3-32b:
+    api:
+      model: qwen3-32b
+      api_key_field: QWEN_API_KEY
+      base_url_field: QWEN_BASE_URL
+      extra_body:
+        enable_thinking: false
+
+  deepseek-v3:
+    api:
+      model: deepseek-chat
+      api_key_field: DEEPSEEK_API_KEY
+      base_url_field: DEEPSEEK_BASE_URL
+    siliconflow-batch:
+      model: deepseek-ai/DeepSeek-V3
+
+  local-qwen3:
+    llm-infer:
+      model: /path/to/models/Qwen3-32B
+      visible_devices: "0"
+      tensor_parallel_size: 1
+      thinking: false

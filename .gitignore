@@ -184,3 +184,6 @@ generation/api_config.yaml
 
 # Temporary files
 temp/
+
+# Machine-specific inference profiles
+generation/inference_config.yaml
