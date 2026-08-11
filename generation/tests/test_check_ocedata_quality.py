@@ -17,12 +17,18 @@ from generation.check_ocedata_quality import (
 
 PRE = "code_before_purify"
 POST = "code_after_purify"
-INSTRUCTION = "instruct_purify"
-VALID_INSTRUCTION = "Update the code."
+INSTRUCTION_FIELDS = (
+    "instruct_descriptive_purify",
+    "instruct_lazy_purify",
+)
+VALID_INSTRUCTIONS = {
+    INSTRUCTION_FIELDS[0]: "Update the code with detailed error handling.",
+    INSTRUCTION_FIELDS[1]: "Add error handling.",
+}
 
 
 def with_instruction(record):
-    return {INSTRUCTION: VALID_INSTRUCTION, **record}
+    return {**VALID_INSTRUCTIONS, **record}
 
 
 def issue_codes(record):
@@ -255,26 +261,41 @@ class FormatAndParsingTests(unittest.TestCase):
     def test_instruction_must_be_present_nonempty_string(self):
         code_fields = {PRE: "value = 1\n", POST: "value = 2\n"}
         cases = [
-            ({}, "missing_field"),
-            ({INSTRUCTION: 3}, "invalid_field_type"),
-            ({INSTRUCTION: ""}, "empty_instruction"),
-            ({INSTRUCTION: " \n\t"}, "empty_instruction"),
+            ("missing", None, "missing_field"),
+            ("non-string", 3, "invalid_field_type"),
+            ("empty", "", "empty_instruction"),
+            ("whitespace", " \n\t", "empty_instruction"),
         ]
-        for instruction_fields, expected_code in cases:
-            with self.subTest(instruction_fields=instruction_fields):
-                issues, _ = inspect_pair(
-                    {**code_fields, **instruction_fields}, PRE, POST
-                )
-                instruction_issues = [
-                    issue for issue in issues if issue["side"] == "instruction"
-                ]
-                self.assertEqual(
-                    [issue["code"] for issue in instruction_issues],
-                    [expected_code],
-                )
-                self.assertEqual(instruction_issues[0]["field"], INSTRUCTION)
+        for instruction_field in INSTRUCTION_FIELDS:
+            for case_name, value, expected_code in cases:
+                with self.subTest(field=instruction_field, case=case_name):
+                    record = with_instruction(code_fields)
+                    if case_name == "missing":
+                        del record[instruction_field]
+                    else:
+                        record[instruction_field] = value
+                    issues, _ = inspect_pair(record, PRE, POST)
+                    instruction_issues = [
+                        issue for issue in issues if issue["side"] == "instruction"
+                    ]
+                    self.assertEqual(
+                        [issue["code"] for issue in instruction_issues],
+                        [expected_code],
+                    )
+                    self.assertEqual(
+                        instruction_issues[0]["field"], instruction_field
+                    )
 
         issues, _ = inspect_pair(with_instruction(code_fields), PRE, POST)
+        self.assertEqual(issues, [])
+
+        legacy_field = "edit_request"
+        issues, _ = inspect_pair(
+            {**code_fields, legacy_field: "Update the value."},
+            PRE,
+            POST,
+            instruction_field=legacy_field,
+        )
         self.assertEqual(issues, [])
 
 
@@ -348,24 +369,26 @@ class JsonlIntegrationTests(unittest.TestCase):
                 default_summary_data["summary_file"], str(default_summary)
             )
 
-    def test_custom_instruction_field_filters_empty_instructions(self):
+    def test_custom_instruction_fields_filter_empty_instructions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "input.jsonl"
             report = root / "issues.jsonl"
             filtered = root / "filtered.jsonl"
             summary_file = root / "summary.yaml"
-            custom_field = "edit_request"
+            custom_fields = ("detailed_edit_request", "brief_edit_request")
             valid = {
                 PRE: "value = 1\n",
                 POST: "value = 2\n",
-                custom_field: "Increment the value.",
+                custom_fields[0]: "Increment the value from one to two.",
+                custom_fields[1]: "Increment the value.",
                 "commit": "good",
             }
             invalid = {
                 PRE: "value = 1\n",
                 POST: "value = 2\n",
-                custom_field: " \n",
+                custom_fields[0]: "Increment the value from one to two.",
+                custom_fields[1]: " \n",
                 "commit": "bad",
             }
             source.write_text(
@@ -380,7 +403,7 @@ class JsonlIntegrationTests(unittest.TestCase):
                         "--report-file", str(report),
                         "--filtered-file", str(filtered),
                         "--summary-file", str(summary_file),
-                        "--instruction-field", custom_field,
+                        "--instruction-fields", *custom_fields,
                         "--fail-on-issues",
                         "--no-progress",
                     ]
@@ -397,7 +420,7 @@ class JsonlIntegrationTests(unittest.TestCase):
             reported = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(reported["commit"], "bad")
             self.assertEqual(reported["issues"][0]["side"], "instruction")
-            self.assertEqual(reported["issues"][0]["field"], custom_field)
+            self.assertEqual(reported["issues"][0]["field"], custom_fields[1])
 
     def test_rejects_overlapping_paths(self):
         with tempfile.TemporaryDirectory() as directory:

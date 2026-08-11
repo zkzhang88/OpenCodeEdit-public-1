@@ -71,6 +71,10 @@ RUNTIME_GLOBALS = {
 }
 BUILTIN_NAMES = set(dir(builtins)) | PYTHON2_BUILTINS | RUNTIME_GLOBALS
 STDLIB_MODULES = set(getattr(sys, "stdlib_module_names", ()))
+DEFAULT_INSTRUCTION_FIELDS = (
+    "instruct_descriptive_purify",
+    "instruct_lazy_purify",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +670,9 @@ def inspect_pair(
     record: Dict[str, object],
     pre_field: str,
     post_field: str,
-    instruction_field: str = "instruct_purify",
+    instruction_field: Optional[str] = None,
+    *,
+    instruction_fields: Optional[Sequence[str]] = None,
 ) -> Tuple[List[Dict[str, object]], Counter]:
     issues: List[Dict[str, object]] = []
     parse_counts: Counter = Counter()
@@ -676,32 +682,37 @@ def inspect_pair(
     pre_incomplete_issues: List[Dict[str, object]] = []
     post_parse_issues: List[Dict[str, object]] = []
 
-    if instruction_field not in record:
-        issues.append(
-            make_issue(
-                "missing_field",
-                "instruction",
-                instruction_field,
-                f"Required field '{instruction_field}' is missing",
+    configured_instruction_fields = _resolve_instruction_fields(
+        instruction_field, instruction_fields
+    )
+    for configured_field in configured_instruction_fields:
+        if configured_field not in record:
+            issues.append(
+                make_issue(
+                    "missing_field",
+                    "instruction",
+                    configured_field,
+                    f"Required field '{configured_field}' is missing",
+                )
             )
-        )
-    else:
-        instruction = record[instruction_field]
+            continue
+        instruction = record[configured_field]
         if not isinstance(instruction, str):
             issues.append(
                 make_issue(
                     "invalid_field_type",
                     "instruction",
-                    instruction_field,
+                    configured_field,
                     f"Expected a string, got {type(instruction).__name__}",
                 )
             )
-        elif not instruction.strip():
+            continue
+        if not instruction.strip():
             issues.append(
                 make_issue(
                     "empty_instruction",
                     "instruction",
-                    instruction_field,
+                    configured_field,
                     "Edit instruction is empty",
                 )
             )
@@ -802,6 +813,37 @@ def inspect_pair(
     return issues, parse_counts
 
 
+def _resolve_instruction_fields(
+    instruction_field: Optional[str],
+    instruction_fields: Optional[Sequence[str]],
+) -> Tuple[str, ...]:
+    """Resolve the legacy singular option and the multi-field configuration."""
+    if instruction_field is not None and instruction_fields is not None:
+        raise ValueError(
+            "instruction_field and instruction_fields cannot both be specified"
+        )
+    if instruction_fields is not None:
+        configured = (
+            (instruction_fields,)
+            if isinstance(instruction_fields, str)
+            else instruction_fields
+        )
+    elif instruction_field is not None:
+        configured = (instruction_field,)
+    else:
+        configured = DEFAULT_INSTRUCTION_FIELDS
+    if not configured:
+        raise ValueError("At least one instruction field must be configured")
+
+    resolved: List[str] = []
+    for field_name in configured:
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError("Instruction field names must be non-empty strings")
+        if field_name not in resolved:
+            resolved.append(field_name)
+    return tuple(resolved)
+
+
 def _validate_paths(
     input_file: Path,
     report_file: Path,
@@ -840,10 +882,14 @@ def check_jsonl(
     post_field: str = "code_after_purify",
     show_progress: bool = True,
     summary_file: Optional[Path] = None,
-    instruction_field: str = "instruct_purify",
+    instruction_field: Optional[str] = None,
+    instruction_fields: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
     """Check JSONL and atomically write issue, filtered, and summary outputs."""
     _validate_paths(input_file, report_file, filtered_file, summary_file)
+    configured_instruction_fields = _resolve_instruction_fields(
+        instruction_field, instruction_fields
+    )
     # Count records without loading them so tqdm can display a percentage and ETA.
     record_count = None
     if show_progress:
@@ -880,7 +926,10 @@ def check_jsonl(
                         )
                     record = loaded
                     issues, row_parse_counts = inspect_pair(
-                        record, pre_field, post_field, instruction_field
+                        record,
+                        pre_field,
+                        post_field,
+                        instruction_fields=configured_instruction_fields,
                     )
                     parse_counts.update(row_parse_counts)
                 except (json.JSONDecodeError, TypeError) as exc:
@@ -1039,7 +1088,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pre-field", default="code_before_purify")
     parser.add_argument("--post-field", default="code_after_purify")
-    parser.add_argument("--instruction-field", default="instruct_purify")
+    parser.add_argument(
+        "--instruction-fields",
+        "--instruction-field",
+        dest="instruction_fields",
+        nargs="+",
+        default=DEFAULT_INSTRUCTION_FIELDS,
+        metavar="FIELD",
+        help=(
+            "Instruction fields that must contain non-empty strings "
+            "(defaults: instruct_descriptive_purify and "
+            "instruct_lazy_purify)."
+        ),
+    )
     parser.add_argument(
         "--fail-on-issues",
         action="store_true",
@@ -1070,7 +1131,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             summary_file=summary_file,
             pre_field=args.pre_field,
             post_field=args.post_field,
-            instruction_field=args.instruction_field,
+            instruction_fields=args.instruction_fields,
             show_progress=not args.no_progress,
         )
     except (OSError, ValueError) as exc:

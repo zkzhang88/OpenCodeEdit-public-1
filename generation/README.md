@@ -231,15 +231,17 @@ repaired the incomplete input. When possible, pre-edit code is silently analyzed
 as the baseline for identifying issues introduced by the edit. Post-edit code
 receives the complete Python syntax and static-reference checks, including
 undefined names, missing imports, and references made unresolvable by an edit.
-The edit instruction, pre-edit code, and post-edit code fields must all be
-strings and must not be empty or contain only whitespace. The edit instruction
-defaults to the `instruct_purify` field; its contents are not otherwise checked.
+The edit instructions, pre-edit code, and post-edit code fields must all be
+strings and must not be empty or contain only whitespace. By default, both
+`instruct_descriptive_purify` and `instruct_lazy_purify` are required; their
+contents are not otherwise checked.
 Sample code and third-party imports are never executed.
 Pre/post code is considered identical when it differs only in blank lines or
 formatting whitespace; whitespace inside strings remains significant.
 Use `--input-file`, `--report-file`, `--filtered-file`, `--summary-file`,
-`--pre-field`, `--post-field`, and `--instruction-field` to override the
-defaults. Add
+`--pre-field`, `--post-field`, and `--instruction-fields FIELD [FIELD ...]` to
+override the defaults. The legacy spelling `--instruction-field` remains an
+alias and also accepts one or more field names. Add
 `--fail-on-issues` to return a non-zero status when rejected samples are found.
 The checker displays a `tqdm` progress bar by default; use `--no-progress` to
 disable it.
