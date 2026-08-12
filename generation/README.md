@@ -188,49 +188,9 @@ python get_instruct_from_response.py ./data/generated_instr_qwen3.jsonl ./data/t
 The code edit triplets are stored in the `triplets_qwen3.jsonl`.
 
 
-## Data Mixing
-To mix the extracted data from different models and different description, use `mix_data.py`. The combination of each dataset can be set up through yaml files in `./mix_config/` folder. 
+## Quality Check
 
-For example, to combine the descriptive instructions of Qwen3 and DeepSeek generated data:
-```yaml
-## ocedata_mix_descriptive.yaml
-# Each entry in the fields input_files, ratios, instr_types, and model_names must correspond to one another one-to-one.
-
-input_files:
-  - data/triplets_qwen3.jsonl
-  - data/triplets_ds.jsonl
-ratios: [0.5, 0.5]
-instr_types: [descriptive, descriptive]
-model_names: [qwen3, ds]
-output_file: data/ocedata_mix_descriptive.jsonl
-total_samples: 60000   # The total samples in the output file
-random_seed: 42   # random seed for sampling data from each input file
-```
-
-This will merge the specified input files into a single dataset `ocedata_mix_descriptive.jsonl` for downstream tasks. 
-
-**Settings in `./mix_config/` folder:**
-- `ocedata_mix_descriptive.yaml`: combine the descriptive instructions from Qwen3 and DeepSeek;
-- `ocedata_mix_lazy.yaml`: combine the lazy instructions from Qwen3 and DeepSeek;
-- `ocedata_mix.yaml`: combine the descriptive and lazy instructions from Qwen3 and DeepSeek.
-
-The usage of `mix_data.py`:
-```bash
-python mix_data.py --config ./mix_config/ocedata_mix_descriptive.yaml
-```
-
-
-## DT Filtering
-Run `dt_filtering.py` to filter data using DTFiltering:
-```bash
-python dt_filtering.py --config filter_config.yaml
-```
-
-You can change the file to be filtered in the `filter_config.yaml`. The output file will be stored in the `./data/filtered/` directory, with a `_dt_filtered` suffix. 
-
-In HDP modeling process, the analysis results are saved in `*.joblib` files in `./utils/fit_results/` directory, for repetitive running. If you want to rebuild the analysis results, set `refit: true` in `filter_config.yaml`.
-
-## OCEData Static Quality Check
+### Static Quality Check
 
 Run the static quality checker from the repository root:
 
@@ -334,7 +294,7 @@ are written below type-named directories such as
 `ocedataft_quality_filtered_samples/ds_descriptive/line_NNNNNN/`.
 
 
-## Split Instruction Variants
+### Split Instruction Variants
 
 Static-quality output keeps both purified instruction variants on each code
 pair. Before semantic checking, split it into independent descriptive and lazy
@@ -369,7 +329,7 @@ existing files, and uses adjacent temporary files for atomic completion. Use
 to override the default paths or source fields.
 
 
-## LLM Semantic Quality Check
+### LLM Semantic Quality Check
 
 Run the semantic checker separately on the two split JSONL files. Each variant
 has an independent run directory, retry state, decisions, and filtered output;
@@ -469,6 +429,51 @@ Output paths and input field names can be overridden with `--result-file`,
 `--instruction-field`. The original input and prompt templates must not change
 during a run. Feed the descriptive and lazy semantic filtered files into their
 respective downstream pipelines; do not intersect or union their decisions.
+
+
+## Data Mixing
+
+To mix the extracted data from different models and different description, use `mix_data.py`. The combination of each dataset can be set up through yaml files in `./mix_config/` folder.
+
+For example, to combine the descriptive instructions of Qwen3 and DeepSeek generated data:
+```yaml
+## ocedata_mix_descriptive.yaml
+# Each entry in the fields input_files, ratios, instr_types, and model_names must correspond to one another one-to-one.
+
+input_files:
+  - data/triplets_qwen3.jsonl
+  - data/triplets_ds.jsonl
+ratios: [0.5, 0.5]
+instr_types: [descriptive, descriptive]
+model_names: [qwen3, ds]
+output_file: data/ocedata_mix_descriptive.jsonl
+total_samples: 60000   # The total samples in the output file
+random_seed: 42   # random seed for sampling data from each input file
+```
+
+This will merge the specified input files into a single dataset `ocedata_mix_descriptive.jsonl` for downstream tasks.
+
+**Settings in `./mix_config/` folder:**
+- `ocedata_mix_descriptive.yaml`: combine the descriptive instructions from Qwen3 and DeepSeek;
+- `ocedata_mix_lazy.yaml`: combine the lazy instructions from Qwen3 and DeepSeek;
+- `ocedata_mix.yaml`: combine the descriptive and lazy instructions from Qwen3 and DeepSeek.
+
+The usage of `mix_data.py`:
+```bash
+python mix_data.py --config ./mix_config/ocedata_mix_descriptive.yaml
+```
+
+
+## DT Filtering
+
+Run `dt_filtering.py` to filter data using DTFiltering:
+```bash
+python dt_filtering.py --config filter_config.yaml
+```
+
+You can change the file to be filtered in the `filter_config.yaml`. The output file will be stored in the `./data/filtered/` directory, with a `_dt_filtered` suffix.
+
+In HDP modeling process, the analysis results are saved in `*.joblib` files in `./utils/fit_results/` directory, for repetitive running. If you want to rebuild the analysis results, set `refit: true` in `filter_config.yaml`.
 
 
 ## Finetune dataset construction
