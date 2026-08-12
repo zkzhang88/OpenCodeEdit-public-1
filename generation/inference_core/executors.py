@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -392,6 +393,7 @@ class LlmInferBatchExecutor:
             str(executor_config.get("gpu_memory_utilization", 0.9)),
             "--server-log",
             str(log_path),
+            "--progress",
             "--resume" if resume else "--no-resume",
         ]
         if executor_config.get("auto_serve", True):
@@ -421,6 +423,89 @@ class LlmInferBatchExecutor:
         if executor_config.get("visible_devices") is not None:
             environment["CUDA_VISIBLE_DEVICES"] = str(executor_config["visible_devices"])
         return command, environment
+
+    @staticmethod
+    def _relay_stderr(
+        read_fd: int,
+        log_file: Any,
+        console: Any,
+        relay_errors: list[Exception],
+    ) -> None:
+        console_buffer = getattr(console, "buffer", None)
+        console_enabled = True
+        log_enabled = True
+        try:
+            while True:
+                chunk = os.read(read_fd, 64 * 1024)
+                if not chunk:
+                    break
+                if log_enabled:
+                    try:
+                        log_file.write(chunk)
+                        log_file.flush()
+                    except Exception as error:
+                        relay_errors.append(error)
+                        log_enabled = False
+                if not console_enabled:
+                    continue
+                try:
+                    if console_buffer is not None:
+                        console_buffer.write(chunk)
+                        console_buffer.flush()
+                    else:
+                        console.write(chunk.decode("utf-8", errors="replace"))
+                        console.flush()
+                except Exception:
+                    console_enabled = False
+        except Exception as error:
+            relay_errors.append(error)
+        finally:
+            os.close(read_fd)
+
+    def _run_with_live_stderr(
+        self,
+        command: list[str],
+        environment: dict[str, str],
+        stdout_file: Any,
+        stderr_file: Any,
+    ) -> tuple[Any | None, BaseException | None, list[Exception]]:
+        read_fd, write_fd = os.pipe()
+        relay_errors: list[Exception] = []
+        relay = threading.Thread(
+            target=self._relay_stderr,
+            args=(read_fd, stderr_file, sys.stderr, relay_errors),
+            name="llm-infer-stderr-relay",
+        )
+        relay.start()
+        completed_process = None
+        runner_error: BaseException | None = None
+        try:
+            completed_process = self.runner(
+                command,
+                shell=False,
+                env=environment,
+                stdout=stdout_file,
+                stderr=write_fd,
+                check=False,
+            )
+        except KeyboardInterrupt as error:
+            runner_error = error
+        except Exception as error:
+            runner_error = error
+            message = f"{type(error).__name__}: {error}\n".encode(
+                "utf-8", errors="replace"
+            )
+            try:
+                os.write(write_fd, message)
+            except OSError:
+                pass
+        finally:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+            relay.join()
+        return completed_process, runner_error, relay_errors
 
     def advance_round(
         self,
@@ -519,30 +604,37 @@ class LlmInferBatchExecutor:
             round_state.pop("last_error", None)
             save_manifest()
             with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open(
-                "w", encoding="utf-8"
+                "wb"
             ) as stderr_file:
-                try:
-                    completed_process = self.runner(
-                        command,
-                        shell=False,
-                        env=environment,
-                        stdout=stdout_file,
-                        stderr=stderr_file,
-                        check=False,
+                completed_process, runner_error, relay_errors = (
+                    self._run_with_live_stderr(
+                        command, environment, stdout_file, stderr_file
                     )
-                except KeyboardInterrupt:
-                    round_state["status"] = "interrupted"
-                    round_state["last_exit_code"] = 130
-                    save_manifest()
-                    return "interrupted"
-                except Exception as error:
-                    stderr_file.write(f"{type(error).__name__}: {error}\n")
-                    stderr_file.flush()
-                    round_state["status"] = "interrupted"
-                    round_state["last_exit_code"] = 1
-                    round_state["last_error"] = f"{type(error).__name__}: {error}"
-                    save_manifest()
-                    return "interrupted"
+                )
+            if isinstance(runner_error, KeyboardInterrupt):
+                round_state["status"] = "interrupted"
+                round_state["last_exit_code"] = 130
+                save_manifest()
+                return "interrupted"
+            if runner_error is not None:
+                round_state["status"] = "interrupted"
+                round_state["last_exit_code"] = 1
+                round_state["last_error"] = (
+                    f"{type(runner_error).__name__}: {runner_error}"
+                )
+                save_manifest()
+                return "interrupted"
+            if relay_errors:
+                error = relay_errors[0]
+                round_state["status"] = "interrupted"
+                round_state["last_exit_code"] = 1
+                round_state["last_error"] = (
+                    f"stderr relay failed: {type(error).__name__}: {error}"
+                )
+                save_manifest()
+                return "interrupted"
+            if completed_process is None:
+                raise InferenceError("llm-infer runner returned no process result")
 
             repair_incomplete_jsonl_tail(output_path)
             successes, failures, seen = inspect_batch_output(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -574,7 +575,10 @@ class SemanticWorkflowTests(unittest.TestCase):
         request_bodies = []
 
         def runner(command, **kwargs):
-            del kwargs
+            os.write(
+                kwargs["stderr"],
+                b"batch inference 1/1\rbatch complete: succeeded=1\n",
+            )
             input_path = Path(command[command.index("--input") + 1])
             output_path = Path(command[command.index("--output") + 1])
             requests = read_jsonl(input_path)
@@ -604,17 +608,35 @@ class SemanticWorkflowTests(unittest.TestCase):
             write_jsonl(output_path, results)
             return SimpleNamespace(returncode=0)
 
-        result = create_semantic_run(
-            executor="llm-infer",
-            model="test-local",
-            config_path=self.config_path,
-            input_path=self.input_path,
-            run_dir=self.run_dir,
-            executor_instance=LlmInferBatchExecutor(runner=runner),
-        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = create_semantic_run(
+                executor="llm-infer",
+                model="test-local",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                run_dir=self.run_dir,
+                executor_instance=LlmInferBatchExecutor(runner=runner),
+            )
         self.assertEqual(result, 0)
         self.assertEqual(request_bodies[0]["response_format"], {"type": "json_object"})
         self.assertEqual(semantic_status(self.run_dir)["status"], "complete")
+        report = stderr.getvalue()
+        self.assertIn("[semantic] inference start attempt=1", report)
+        self.assertIn("batch inference 1/1\r", report)
+        self.assertIn("batch complete: succeeded=1", report)
+        self.assertIn("[semantic] validation start attempt=1", report)
+        stderr_log = (
+            self.run_dir
+            / "attempt_001"
+            / "inference"
+            / "round_001"
+            / "attempt_001.stderr.log"
+        )
+        self.assertEqual(
+            stderr_log.read_bytes(),
+            b"batch inference 1/1\rbatch complete: succeeded=1\n",
+        )
 
 
 if __name__ == "__main__":

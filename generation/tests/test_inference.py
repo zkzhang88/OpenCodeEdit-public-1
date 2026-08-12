@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -820,9 +822,117 @@ class InferenceTests(unittest.TestCase):
                 ["conda", "run", "--no-capture-output", "-n", "llm_infer", "batch-infer", "batch"],
             )
             self.assertIn("--auto-serve", command)
+            self.assertIn("--progress", command)
             self.assertIn("--no-thinking", command)
             self.assertFalse(kwargs["shell"])
             self.assertEqual(kwargs["env"]["CUDA_VISIBLE_DEVICES"], "2,3")
+
+    def test_llm_infer_streams_stderr_and_preserves_logs(self):
+        progress = (
+            b"Ensuring local vLLM.\n"
+            b"\x1b[32mbatch inference\x1b[0m 1/2\r"
+            b"batch complete: total=2 succeeded=2\n"
+        )
+
+        def runner(command, **kwargs):
+            kwargs["stdout"].write("stdout-only\n")
+            kwargs["stdout"].flush()
+            os.write(kwargs["stderr"], progress[:24])
+            os.write(kwargs["stderr"], progress[24:])
+            input_path = Path(command[command.index("--input") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            requests = [json.loads(line) for line in input_path.read_text().splitlines()]
+            write_jsonl(
+                output_path,
+                [
+                    {
+                        "custom_id": request["custom_id"],
+                        "response": {
+                            "status_code": 200,
+                            "body": {
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": "ok",
+                                        }
+                                    }
+                                ]
+                            },
+                        },
+                        "error": None,
+                    }
+                    for request in requests
+                ],
+            )
+            return SimpleNamespace(returncode=0)
+
+        write_jsonl(
+            self.input_path,
+            [dict(record, user=record["user"][:1]) for record in self.prompts],
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = create_run(
+                executor="llm-infer",
+                model="test-local",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                executor_instance=LlmInferBatchExecutor(runner=runner),
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr.getvalue().encode(), progress)
+        round_dir = self.run_dir / "round_001"
+        self.assertEqual(
+            (round_dir / "attempt_001.stderr.log").read_bytes(), progress
+        )
+        self.assertEqual(
+            (round_dir / "attempt_001.stdout.log").read_text(encoding="utf-8"),
+            "stdout-only\n",
+        )
+        self.assertNotIn("stdout-only", stderr.getvalue())
+
+    def test_llm_infer_stderr_relay_isolates_console_and_log_failures(self):
+        class BrokenConsole:
+            def write(self, value):
+                del value
+                raise OSError("console closed")
+
+            def flush(self):
+                raise OSError("console closed")
+
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"progress survives\n")
+        os.close(write_fd)
+        log = io.BytesIO()
+        relay_errors = []
+        LlmInferBatchExecutor._relay_stderr(
+            read_fd, log, BrokenConsole(), relay_errors
+        )
+        self.assertEqual(log.getvalue(), b"progress survives\n")
+        self.assertEqual(relay_errors, [])
+
+        class BrokenLog:
+            def write(self, value):
+                del value
+                raise OSError("log unavailable")
+
+            def flush(self):
+                raise OSError("log unavailable")
+
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"progress remains visible\n")
+        os.close(write_fd)
+        console = io.StringIO()
+        relay_errors = []
+        LlmInferBatchExecutor._relay_stderr(
+            read_fd, BrokenLog(), console, relay_errors
+        )
+        self.assertEqual(console.getvalue(), "progress remains visible\n")
+        self.assertEqual(len(relay_errors), 1)
+        self.assertIn("log unavailable", str(relay_errors[0]))
 
     def test_llm_infer_retries_only_failed_task(self):
         attempts = []
@@ -869,8 +979,8 @@ class InferenceTests(unittest.TestCase):
         calls = []
 
         def runner(command, **kwargs):
-            del kwargs
             calls.append(command)
+            os.write(kwargs["stderr"], f"progress-{len(calls)}\n".encode())
             input_path = Path(command[command.index("--input") + 1])
             output_path = Path(command[command.index("--output") + 1])
             requests = [json.loads(line) for line in input_path.read_text().splitlines()]
@@ -912,22 +1022,25 @@ class InferenceTests(unittest.TestCase):
             [dict(record, user=record["user"][:1]) for record in self.prompts],
         )
         executor = LlmInferBatchExecutor(runner=runner)
-        result = create_run(
-            executor="llm-infer",
-            model="test-local",
-            config_path=self.config_path,
-            input_path=self.input_path,
-            output_path=self.output_path,
-            run_dir=self.run_dir,
-            executor_instance=executor,
-        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = create_run(
+                executor="llm-infer",
+                model="test-local",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                output_path=self.output_path,
+                run_dir=self.run_dir,
+                executor_instance=executor,
+            )
         self.assertEqual(result, 130)
         manifest = load_yaml(self.run_dir / "manifest.yaml")
         active = manifest["rounds"][0]["active_attempt"]
         self.assertEqual(active["resume_count"], 0)
         self.assertIn("--no-resume", calls[0])
 
-        result = resume_run(self.run_dir, executor_instance=executor)
+        with redirect_stderr(stderr):
+            result = resume_run(self.run_dir, executor_instance=executor)
         self.assertEqual(result, 0)
         self.assertEqual(len(calls), 2)
         self.assertIn("--resume", calls[1])
@@ -944,6 +1057,19 @@ class InferenceTests(unittest.TestCase):
         self.assertTrue(
             (self.run_dir / "round_001" / "attempt_001_resume_001.stdout.log").exists()
         )
+        round_dir = self.run_dir / "round_001"
+        self.assertEqual(
+            (round_dir / "attempt_001.stderr.log").read_text(encoding="utf-8"),
+            "progress-1\n",
+        )
+        self.assertEqual(
+            (round_dir / "attempt_001_resume_001.stderr.log").read_text(
+                encoding="utf-8"
+            ),
+            "progress-2\n",
+        )
+        self.assertIn("progress-1\n", stderr.getvalue())
+        self.assertIn("progress-2\n", stderr.getvalue())
 
     def test_llm_infer_nonzero_partial_output_remains_resumable(self):
         call_count = 0

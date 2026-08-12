@@ -125,7 +125,12 @@ python generation/inference.py run \
 ```
 
 By default this invokes `conda run --no-capture-output -n llm_infer
-batch-infer batch --auto-serve` once per conversation round. Set
+batch-infer batch --progress --auto-serve` once per conversation round. The
+managed vLLM startup output, warnings, and Batch progress are shown live on
+stderr while the same bytes are preserved in the round's
+`attempt_*.stderr.log`; stdout remains in `attempt_*.stdout.log`. This applies
+to both direct inference and semantic checks that use the `llm-infer`
+executor. Set
 `auto_serve: false` and `base_url` in the profile to reuse an existing service.
 If API or local inference is interrupted, resume the same attempt with:
 
