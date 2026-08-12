@@ -365,14 +365,34 @@ class InferenceTests(unittest.TestCase):
 
         recovery_client = FakeApiClient()
         recovery_progress = RecordingProgressFactory()
+        self.api_config.write_text(
+            yaml.safe_dump(
+                {
+                    "TEST_KEY": "rotated-secret",
+                    "TEST_URL": "https://rotated.invalid/v1",
+                    "SILICONFLOW_API_KEY": "secret",
+                    "SILICONFLOW_BASE_URL": "https://example.invalid/v1",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.config_path.unlink()
+        recovery_clients = []
+
+        def recovery_factory(**kwargs):
+            recovery_clients.append(kwargs)
+            return recovery_client
+
         result = resume_run(
             self.run_dir,
             executor_instance=RealtimeApiExecutor(
-                client_factory=lambda **kwargs: recovery_client,
+                client_factory=recovery_factory,
                 progress_factory=recovery_progress,
             ),
         )
         self.assertEqual(result, 0)
+        self.assertEqual(recovery_clients[0]["api_key"], "rotated-secret")
+        self.assertEqual(recovery_clients[0]["base_url"], "https://rotated.invalid/v1")
         self.assertEqual(len(recovery_client.chat.completions.calls), 1)
         self.assertEqual(
             recovery_client.chat.completions.calls[0]["messages"][-1]["content"],
@@ -484,6 +504,7 @@ class InferenceTests(unittest.TestCase):
         with self.assertRaisesRegex(InferenceError, "continue"):
             resume_run(self.run_dir, executor_instance=executor)
 
+        self.config_path.unlink()
         result = continue_run(
             self.run_dir, wait=True, executor_instance=executor
         )
@@ -1039,6 +1060,7 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(active["resume_count"], 0)
         self.assertIn("--no-resume", calls[0])
 
+        self.config_path.unlink()
         with redirect_stderr(stderr):
             result = resume_run(self.run_dir, executor_instance=executor)
         self.assertEqual(result, 0)
@@ -1366,6 +1388,7 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(show_status(self.run_dir)["status"], "incomplete")
 
         should_succeed = True
+        self.config_path.unlink()
         result = retry_run(self.run_dir, executor_instance=executor)
         self.assertEqual(result, 0)
         self.assertTrue(self.output_path.exists())

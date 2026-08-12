@@ -17,11 +17,12 @@ from typing import Any, Iterable
 if __package__:
     from .inference_core import (
         continue_run,
-        create_run,
+        create_run_from_config,
         resume_run,
         retry_run,
         show_status,
     )
+    from .inference_core.config import resolve_config, validated_config_snapshot
     from .inference_core.io import (
         InferenceError,
         atomic_write_jsonl,
@@ -34,10 +35,14 @@ if __package__:
 else:
     from inference_core import (  # type: ignore[no-redef]
         continue_run,
-        create_run,
+        create_run_from_config,
         resume_run,
         retry_run,
         show_status,
+    )
+    from inference_core.config import (  # type: ignore[no-redef]
+        resolve_config,
+        validated_config_snapshot,
     )
     from inference_core.io import (  # type: ignore[no-redef]
         InferenceError,
@@ -326,10 +331,6 @@ def _validate_snapshots(manifest: dict[str, Any]) -> None:
     input_path = Path(manifest["input_path"])
     if sha256_file(input_path) != manifest["input_sha256"]:
         raise InferenceError("Input file changed since the semantic run was created")
-    if sha256_file(manifest["config_path"]) != manifest["config_sha256"]:
-        raise InferenceError(
-            "Inference config changed since the semantic run was created"
-        )
     system_prompt, user_prompt = get_prompts()
     if _prompt_hash(system_prompt, user_prompt) != manifest["prompt_sha256"]:
         raise InferenceError("Semantic prompts changed since the run was created")
@@ -370,22 +371,78 @@ def _attempt_paths(run_dir: Path, attempt_number: int) -> dict[str, Path]:
     }
 
 
-def _sampling_overrides(manifest: dict[str, Any]) -> dict[str, Any]:
-    overrides = dict(manifest["runtime_overrides"])
+def _inference_overrides(
+    executor: str,
+    runtime_overrides: dict[str, Any],
+    sampling: dict[str, Any],
+) -> dict[str, Any]:
+    overrides = dict(runtime_overrides)
     overrides.update(
         {
             "num_completion": 1,
-            "temperature": manifest["sampling"]["temperature"],
-            "top_p": manifest["sampling"]["top_p"],
-            "max_tokens": manifest["sampling"]["max_tokens"],
+            "temperature": sampling["temperature"],
+            "top_p": sampling["top_p"],
+            "max_tokens": sampling["max_tokens"],
         }
     )
     response_format = {"response_format": {"type": "json_object"}}
-    if manifest["executor"] == "api":
+    if executor == "api":
         overrides["extra_body"] = response_format
     else:
         overrides["request_body"] = response_format
     return overrides
+
+
+def _config_snapshot_hash(config: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        config, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _ensure_inference_config_snapshot(manifest: dict[str, Any]) -> dict[str, Any]:
+    snapshot = manifest.get("inference_config")
+    if snapshot is None:
+        attempts = manifest.get("attempts")
+        if not isinstance(attempts, list) or not attempts:
+            raise InferenceError(
+                "Semantic run has no frozen inference config and no child run "
+                "from which to recover it"
+            )
+        first_attempt = attempts[0]
+        if not isinstance(first_attempt, dict) or not first_attempt.get("inference_dir"):
+            raise InferenceError(
+                "Semantic run has no usable child inference config snapshot"
+            )
+        child_manifest_path = (
+            Path(first_attempt["inference_dir"]) / "manifest.yaml"
+        )
+        if not child_manifest_path.is_file():
+            raise InferenceError(
+                "Semantic run has no usable child inference config snapshot"
+            )
+        child_manifest = load_yaml(child_manifest_path)
+        snapshot = child_manifest.get("config")
+        snapshot = validated_config_snapshot(
+            snapshot, manifest["executor"], manifest["model_name"]
+        )
+        manifest["inference_config"] = snapshot
+        manifest["inference_config_sha256"] = _config_snapshot_hash(snapshot)
+        _save_manifest(manifest)
+        return snapshot
+
+    snapshot = validated_config_snapshot(
+        snapshot, manifest["executor"], manifest["model_name"]
+    )
+    actual_hash = _config_snapshot_hash(snapshot)
+    expected_hash = manifest.get("inference_config_sha256")
+    if expected_hash is not None and expected_hash != actual_hash:
+        raise InferenceError("Frozen inference config snapshot hash does not match")
+    if expected_hash is None:
+        manifest["inference_config"] = snapshot
+        manifest["inference_config_sha256"] = actual_hash
+        _save_manifest(manifest)
+    return snapshot
 
 
 def _start_attempt(
@@ -436,15 +493,15 @@ def _start_attempt(
         f"inference start attempt={attempt_number} samples={len(prompts)} "
         f"run_dir={paths['inference_dir']}"
     )
-    result = create_run(
+    config = _ensure_inference_config_snapshot(manifest)
+    result = create_run_from_config(
         executor=manifest["executor"],
         model=manifest["model_name"],
-        config_path=manifest["config_path"],
+        config=config,
         input_path=paths["prompt_path"],
         output_path=paths["raw_output_path"],
         run_dir=paths["inference_dir"],
         wait=wait,
-        overrides=_sampling_overrides(manifest),
         executor_instance=executor_instance,
     )
     return _after_child_advance(
@@ -738,6 +795,7 @@ def _finalize(manifest: dict[str, Any], state: list[dict[str, Any]]) -> int:
         "input_sha256": manifest["input_sha256"],
         "prompt_sha256": manifest["prompt_sha256"],
         "config_sha256": manifest["config_sha256"],
+        "inference_config_sha256": manifest["inference_config_sha256"],
         "run_dir": manifest["run_dir"],
         "result_file": output_paths["results"],
         "filtered_file": output_paths["filtered"],
@@ -809,14 +867,6 @@ def create_semantic_run(
         post_field=post_field,
         instruction_field=instruction_field,
     )
-    config_sha256 = sha256_file(config_path)
-    _validate_new_paths(
-        input_path, run_dir, result_path, filtered_path, summary_path
-    )
-    run_dir.mkdir(parents=True, exist_ok=True)
-    state_path = run_dir / STATE_NAME
-    state = _initial_state(records)
-    atomic_write_jsonl(state_path, state)
     runtime_overrides = {
         key: value
         for key, value in {
@@ -828,6 +878,25 @@ def create_semantic_run(
         }.items()
         if value is not None
     }
+    sampling = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+    }
+    inference_config = resolve_config(
+        config_path,
+        executor,
+        model,
+        _inference_overrides(executor, runtime_overrides, sampling),
+    )
+    config_sha256 = sha256_file(config_path)
+    _validate_new_paths(
+        input_path, run_dir, result_path, filtered_path, summary_path
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / STATE_NAME
+    state = _initial_state(records)
+    atomic_write_jsonl(state_path, state)
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "status": "created",
@@ -840,6 +909,8 @@ def create_semantic_run(
         "prompt_sha256": _prompt_hash(system_prompt, user_prompt),
         "config_path": str(config_path),
         "config_sha256": config_sha256,
+        "inference_config": inference_config,
+        "inference_config_sha256": _config_snapshot_hash(inference_config),
         "executor": executor,
         "model_name": model,
         "fields": {
@@ -847,11 +918,7 @@ def create_semantic_run(
             "post": post_field,
             "instruction": instruction_field,
         },
-        "sampling": {
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-        },
+        "sampling": sampling,
         "runtime_overrides": runtime_overrides,
         "semantic_retries": semantic_retries,
         "state_path": str(state_path),
@@ -879,6 +946,7 @@ def _advance_existing(
     manifest = _load_manifest(run_dir)
     if manifest["status"] == "complete":
         return 0
+    _ensure_inference_config_snapshot(manifest)
     _validate_snapshots(manifest)
     if not manifest["attempts"]:
         return _start_attempt(

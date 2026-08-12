@@ -143,6 +143,33 @@ def validate_resolved_config(config: dict[str, Any]) -> None:
                 )
 
 
+def validated_config_snapshot(
+    config: object, executor: str, model_profile: str
+) -> dict[str, Any]:
+    """Return an isolated, validated copy of a previously resolved config."""
+
+    if not isinstance(config, dict):
+        raise InferenceError("Resolved inference config snapshot must be a mapping")
+    snapshot = deepcopy(config)
+    if snapshot.get("executor") != executor:
+        raise InferenceError(
+            "Resolved inference config executor does not match the requested executor"
+        )
+    if snapshot.get("model_profile") != model_profile:
+        raise InferenceError(
+            "Resolved inference config model profile does not match the requested model"
+        )
+    try:
+        validate_resolved_config(snapshot)
+    except InferenceError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise InferenceError(
+            f"Invalid resolved inference config snapshot: {error}"
+        ) from error
+    return snapshot
+
+
 def load_credentials(config: dict[str, Any]) -> tuple[str, str]:
     executor_config = config["executor_config"]
     credentials = load_yaml(config["api_config_path"])

@@ -415,6 +415,109 @@ class SemanticWorkflowTests(unittest.TestCase):
             [{"success": 3, "failed": 0}, {"success": 1, "failed": 0}],
         )
 
+    def test_semantic_retry_uses_frozen_config_after_source_is_deleted(self):
+        write_jsonl(self.input_path, self.records[:1])
+
+        class DeletingCompletions:
+            def __init__(self, config_path):
+                self.config_path = config_path
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.config_path.unlink()
+                    return FakeCompletion("not json")
+                return FakeCompletion(json.dumps(check_payload()))
+
+        completions = DeletingCompletions(self.config_path)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        executor = RealtimeApiExecutor(
+            client_factory=lambda **kwargs: client,
+            progress_factory=RecordingProgressFactory(),
+        )
+        with redirect_stderr(io.StringIO()):
+            result = create_semantic_run(
+                executor="api",
+                model="test-api",
+                config_path=self.config_path,
+                input_path=self.input_path,
+                run_dir=self.run_dir,
+                executor_instance=executor,
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(len(completions.calls), 2)
+        manifest = yaml.safe_load(
+            (self.run_dir / "semantic_manifest.yaml").read_text(encoding="utf-8")
+        )
+        self.assertIn("inference_config", manifest)
+        self.assertIn("inference_config_sha256", manifest)
+        self.assertNotIn("secret", json.dumps(manifest))
+        first = yaml.safe_load(
+            (
+                self.run_dir / "attempt_001" / "inference" / "manifest.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        second = yaml.safe_load(
+            (
+                self.run_dir / "attempt_002" / "inference" / "manifest.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(first["config"], second["config"])
+        summary = yaml.safe_load(
+            self.input_path.with_name(
+                "static_filtered_semantic_summary.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            summary["inference_config_sha256"],
+            manifest["inference_config_sha256"],
+        )
+
+    def test_old_semantic_manifest_migrates_config_from_first_child(self):
+        write_jsonl(self.input_path, self.records[:1])
+        result, _, _ = self.api_run([KeyboardInterrupt()])
+        self.assertEqual(result, 130)
+        manifest_path = self.run_dir / "semantic_manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        original_snapshot = manifest.pop("inference_config")
+        manifest.pop("inference_config_sha256")
+        manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+        self.config_path.unlink()
+
+        recovery_client = FakeApiClient([check_payload()])
+        recovery = RealtimeApiExecutor(
+            client_factory=lambda **kwargs: recovery_client,
+            progress_factory=RecordingProgressFactory(),
+        )
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                resume_semantic_run(self.run_dir, executor_instance=recovery), 0
+            )
+        migrated = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["inference_config"], original_snapshot)
+        self.assertIn("inference_config_sha256", migrated)
+
+    def test_old_semantic_manifest_without_any_config_snapshot_fails(self):
+        write_jsonl(self.input_path, self.records[:1])
+        result, _, _ = self.api_run([KeyboardInterrupt()])
+        self.assertEqual(result, 130)
+        manifest_path = self.run_dir / "semantic_manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("inference_config")
+        manifest.pop("inference_config_sha256")
+        manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+        child_manifest = (
+            self.run_dir / "attempt_001" / "inference" / "manifest.yaml"
+        )
+        child_manifest.unlink()
+        self.config_path.unlink()
+
+        with self.assertRaisesRegex(
+            InferenceError, "no usable child inference config snapshot"
+        ):
+            resume_semantic_run(self.run_dir)
+
     def test_invalid_response_retries_twice_then_becomes_error(self):
         write_jsonl(self.input_path, self.records[:1])
         stderr = io.StringIO()

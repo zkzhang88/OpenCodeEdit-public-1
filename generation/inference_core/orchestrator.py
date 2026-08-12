@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import load_credentials, resolve_config
+from .config import load_credentials, resolve_config, validated_config_snapshot
 from .executors import executor_for, load_round_results
 from .io import (
     InferenceError,
@@ -69,11 +69,37 @@ def create_run(
     overrides: dict[str, Any] | None = None,
     executor_instance: Any | None = None,
 ) -> int:
+    config = resolve_config(config_path, executor, model, overrides)
+    return create_run_from_config(
+        executor=executor,
+        model=model,
+        config=config,
+        input_path=input_path,
+        output_path=output_path,
+        run_dir=run_dir,
+        wait=wait,
+        executor_instance=executor_instance,
+    )
+
+
+def create_run_from_config(
+    *,
+    executor: str,
+    model: str,
+    config: dict[str, Any],
+    input_path: str | Path,
+    output_path: str | Path,
+    run_dir: str | Path,
+    wait: bool = False,
+    executor_instance: Any | None = None,
+) -> int:
+    """Create a run from an already resolved, immutable config snapshot."""
+
     input_path = Path(input_path).resolve()
     output_path = Path(output_path).resolve()
     run_dir = Path(run_dir).resolve()
     prompts = normalize_prompts(input_path)
-    config = resolve_config(config_path, executor, model, overrides)
+    config = validated_config_snapshot(config, executor, model)
     tasks = expand_tasks(prompts, int(config["num_completion"]))
     round_count = max(len(task["prompt"]["user"]) for task in tasks)
     if executor in {"api", "siliconflow-batch"}:

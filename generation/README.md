@@ -49,8 +49,14 @@ cp inference_config.example.yaml inference_config.yaml
 Fill API credentials in the ignored `api_config.yaml`. Model names, local model
 paths, sampling settings, GPU selection, and executor options belong in the
 ignored `inference_config.yaml`; see the tracked example for every supported
-field. Credentials are loaded only for the selected executor and are never
-written to a run manifest.
+field. `run` resolves that file once and freezes the selected model/executor
+configuration in the run manifest. Later `resume`, `continue`, and `retry`
+operations use only this frozen configuration, so editing, moving, or deleting
+`inference_config.yaml` cannot change an existing run. Credentials are loaded
+from the recorded `api_config.yaml` path on every API operation, allowing keys
+to be rotated or balances to be restored, and are never written to a manifest.
+The source configuration hash is retained only for creation-time auditing; the
+effective frozen configuration has its own canonical hash.
 
 Run direct API inference from the repository root:
 
@@ -452,7 +458,11 @@ submitted SiliconFlow attempt. If the current inference sub-run exhausts its
 transport attempt budget, correct the external issue and use `retry` to grant a
 new budget. Once the active inference attempt completes, each command
 automatically validates its responses, launches selective semantic retries when
-needed, and writes the final outputs when all samples are resolved.
+needed, and writes the final outputs when all samples are resolved. Semantic
+runs also freeze the fully resolved inference configuration in
+`semantic_manifest.yaml`; older run directories recover that snapshot from
+their first child inference manifest and do not fall back to the current
+`inference_config.yaml`.
 
 Output paths and input field names can be overridden with `--result-file`,
 `--filtered-file`, `--summary-file`, `--pre-field`, `--post-field`, and
