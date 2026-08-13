@@ -2,6 +2,10 @@
 
 import os
 import json
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import logging
 import numpy as np
