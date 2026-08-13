@@ -1,8 +1,8 @@
 input_files:
-  - data/triplets_qwen3.jsonl
-  - data/triplets_qwen3.jsonl
-  - data/triplets_ds.jsonl
-  - data/triplets_ds.jsonl
+  - data/triplets_qwen3_quality_filtered_descriptive_semantic_filtered.jsonl
+  - data/triplets_qwen3_quality_filtered_lazy_semantic_filtered.jsonl
+  - data/triplets_ds_quality_filtered_descriptive_semantic_filtered.jsonl
+  - data/triplets_ds_quality_filtered_lazy_semantic_filtered.jsonl
 ratios: [0.25, 0.25, 0.25, 0.25]
 instr_types: [descriptive, lazy, descriptive, lazy]
 model_names: [qwen3, qwen3, ds, ds]

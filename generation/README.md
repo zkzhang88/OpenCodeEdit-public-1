@@ -471,9 +471,39 @@ Run `dt_filtering.py` to filter data using DTFiltering:
 python dt_filtering.py --config filter_config.yaml
 ```
 
+Select the execution mode at the top level of `filter_config.yaml`:
+
+```yaml
+run_mode: "filter"  # "filter" or "analyze_only"
+```
+
+The default `filter` mode runs both filtering stages and writes the intermediate and final JSONL files. The `analyze_only` mode analyzes the original `jsonl_path` without applying diff filtering or topic sampling, and does not write either `*_diff_filtered.jsonl` or `*_dt_filtered.jsonl`. At least one distribution switch must be enabled in `analyze_only` mode.
+
 You can change the file to be filtered in the `filter_config.yaml`. The output file will be stored in the `./data/filtered/` directory, with a `_dt_filtered` suffix.
 
 In HDP modeling process, the analysis results are saved in `*.joblib` files in `./utils/fit_results/` directory, for repetitive running. If you want to rebuild the analysis results, set `refit: true` in `filter_config.yaml`.
+
+Diff and dominant-topic distribution plots are optional and disabled by default. Configure them independently in `filter_config.yaml`:
+
+```yaml
+statistics:
+  output_diff_distribution: false
+  output_topic_distribution: false
+  output_dir: "data/filtered/statistics"
+```
+
+When diff plots are enabled, the script writes modified-line and hunk histograms for both the original input (`diff_before`) and the data retained by diff filtering (`diff_after`). When topic plots are enabled, it writes the top-20 dominant-topic distributions before and after topic-balanced sampling. The topic model is fitted or loaded only once; both topic plots use the same topic assignments. With both options enabled, the following six PDFs are created under `output_dir`, using the input JSONL basename as `<name>`:
+
+```text
+<name>_diff_before_modified_lines_hist.pdf
+<name>_diff_before_hunk_num_hist.pdf
+<name>_diff_after_modified_lines_hist.pdf
+<name>_diff_after_hunk_num_hist.pdf
+<name>_topic_before_distribution_top20.pdf
+<name>_topic_after_distribution_top20.pdf
+```
+
+In `analyze_only` mode, both analyses use the original input. Only the two `diff_before` PDFs and the `topic_before` PDF selected by the distribution switches are created. Topic analysis may still create or reuse the HDP `.joblib` cache controlled by `filter_settings.refit`.
 
 
 ## Finetune dataset construction

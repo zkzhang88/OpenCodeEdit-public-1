@@ -3,13 +3,22 @@ import json
 import logging
 from utils.statistic_funcs import filter_by_modify_lines
 from utils.statistic_funcs import filter_data_by_hdp_topic_analysis
+from utils.statistic_funcs import compute_diff_statistics
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logging.getLogger('gensim').setLevel(logging.WARNING)
 
 
-def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_settings=None):
+def dt_filtering(
+    jsonl_path,
+    field_name,
+    data_format,
+    random_seed=None,
+    filter_settings=None,
+    statistics_settings=None,
+    run_mode="filter",
+):
     """
     Filters and processes data from a JSONL file using diff-based and topic-based criteria.
     This function performs two main filtering steps:
@@ -27,19 +36,70 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
             - "max_hunk_num" (int): Maximum number of hunks allowed per sample (default: 7).
             - "max_samples_total" (int): Maximum total number of samples after filtering (default: 10000).
             - "refit" (bool): Whether to refit the HDP topic model (default: False).
+        statistics_settings (dict, optional): Optional distribution plot settings.
+            - "output_diff_distribution" (bool): Plot diff distributions before and after diff filtering.
+            - "output_topic_distribution" (bool): Plot topic distributions before and after topic sampling.
+            - "output_dir" (str): Directory for generated PDF files.
+        run_mode (str): Either "filter" for the complete filtering pipeline or
+            "analyze_only" to analyze the original input without filtering it.
     Returns:
-        None: The function writes filtered data to output files in the "filtered" directory.
+        None: Filter mode writes filtered data; analyze-only mode writes only
+            the enabled statistics plots and HDP cache artifacts.
     """
 
 
     base_name = os.path.splitext(os.path.basename(jsonl_path))[0]
-    abs_jsonl_path = os.path.abspath(jsonl_path)
-    dir_name = os.path.dirname(abs_jsonl_path)
-
     max_modify_lines = filter_settings.get("max_modify_lines", 70) if filter_settings else 70
     max_hunk_num = filter_settings.get("max_hunk_num", 7) if filter_settings else 7
     max_samples_total = filter_settings.get("max_samples_total", 10000) if filter_settings else 10000
     refit = filter_settings.get("refit", False) if filter_settings else False
+    statistics_settings = statistics_settings or {}
+    output_diff_distribution = statistics_settings.get("output_diff_distribution", False)
+    output_topic_distribution = statistics_settings.get("output_topic_distribution", False)
+    statistics_output_dir = statistics_settings.get(
+        "output_dir", os.path.join("data", "filtered", "statistics")
+    )
+
+    if run_mode not in {"filter", "analyze_only"}:
+        raise ValueError(
+            f"Unsupported run_mode {run_mode!r}; expected 'filter' or 'analyze_only'"
+        )
+    if run_mode == "analyze_only" and not (
+        output_diff_distribution or output_topic_distribution
+    ):
+        raise ValueError(
+            "analyze_only requires output_diff_distribution or "
+            "output_topic_distribution to be enabled"
+        )
+
+    if output_diff_distribution or output_topic_distribution:
+        os.makedirs(statistics_output_dir, exist_ok=True)
+
+    common_diff_options = {
+        "figure_dir": statistics_output_dir,
+        "old_code_field": "code_before_purify",
+        "new_code_field": "code_after_purify",
+    }
+
+    if run_mode == "analyze_only":
+        if output_diff_distribution:
+            compute_diff_statistics(
+                jsonl_path,
+                filename_prefix=f"{base_name}_diff_before",
+                **common_diff_options,
+            )
+        if output_topic_distribution:
+            filter_data_by_hdp_topic_analysis(
+                jsonl_path=jsonl_path,
+                field_name=field_name,
+                data_format=data_format,
+                random_seed=random_seed,
+                refit=refit,
+                figure_dir=statistics_output_dir,
+                figure_base_name=base_name,
+                analysis_only=True,
+            )
+        return
 
 
     ### Diff Filtering
@@ -52,6 +112,18 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
     diff_output_path = os.path.join(output_dir, output_filename)
     write_jsonl(filtered_data, diff_output_path)
 
+    if output_diff_distribution:
+        compute_diff_statistics(
+            jsonl_path,
+            filename_prefix=f"{base_name}_diff_before",
+            **common_diff_options,
+        )
+        compute_diff_statistics(
+            diff_output_path,
+            filename_prefix=f"{base_name}_diff_after",
+            **common_diff_options,
+        )
+
     ### HDP Topic Filtering
     output_filename = f"{base_name}_dt_filtered.jsonl"
     output_path = os.path.join(output_dir, output_filename)
@@ -63,7 +135,10 @@ def dt_filtering(jsonl_path, field_name, data_format, random_seed=None, filter_s
         output_path=output_path,
         max_samples_total=max_samples_total,
         random_seed=random_seed,
-        refit=refit
+        refit=refit,
+        figure_dir=statistics_output_dir if output_topic_distribution else None,
+        figure_base_name=base_name,
+        analysis_only=False,
     )
 
 
@@ -100,5 +175,7 @@ if __name__ == "__main__":
         field_name=config["field_name"],
         data_format=config["data_format"],
         random_seed=config.get("random_seed", None),
-        filter_settings=config.get("filter_settings", None)
+        filter_settings=config.get("filter_settings", None),
+        statistics_settings=config.get("statistics", None),
+        run_mode=config.get("run_mode", "filter"),
     )

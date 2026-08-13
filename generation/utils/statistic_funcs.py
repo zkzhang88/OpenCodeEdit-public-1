@@ -10,10 +10,7 @@ import argparse
 from tqdm import tqdm
 import difflib
 import json
-import spacy
-import pandas as pd
 from collections import Counter
-import plotly.express as px
 
 from utils.load_instruct_from_file import load_instructions_from_jsonl
 from utils.code_splitter import edit_instruction_splitter
@@ -178,7 +175,8 @@ def hdp_topic_analysis(jsonl_path, field_name, data_format, refit=False, debug=F
 
 
 def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_samples_per_topic=None, max_samples_total=None,
-                                      refit=False, debug=False, random_seed=None, output_path=None):
+                                      refit=False, debug=False, random_seed=None, output_path=None,
+                                      figure_dir=None, figure_base_name=None, analysis_only=False):
     """
     Perform HDP topic analysis on data, then randomly sample topics with more than max_samples_per_topic samples.
     Args:
@@ -190,8 +188,13 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
         debug (bool): Enable debug mode
         random_seed (int): Random seed
         output_path (str): Output file path, auto-generated if None
+        figure_dir (str): If set, save topic distributions before and after sampling here.
+        figure_base_name (str): Filename prefix for topic distribution figures.
+        analysis_only (bool): Analyze and optionally plot the input topic distribution
+            without sampling or writing filtered data.
     Returns:
-        str: Output file path
+        None: Writes filtered data in filtering mode, or only the requested
+            topic plot and model cache artifacts in analysis-only mode.
     """
     import random
     import nltk
@@ -205,7 +208,9 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
         random.seed(random_seed)
         np.random.seed(random_seed)
 
-    if max_samples_total is not None:
+    if analysis_only:
+        log.info("Topic analysis-only mode enabled")
+    elif max_samples_total is not None:
         log.info(f"Total sample count set: {max_samples_total}")
     elif max_samples_per_topic is not None:
         log.info(f"Max samples per topic set: {max_samples_per_topic}")
@@ -284,7 +289,16 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
     # Count document number for each topic
     topic_counts = Counter(dominant_topics)
     log.info(f"Found {len(topic_counts)} topics")
-    
+
+    if analysis_only:
+        if figure_dir:
+            _plot_topic_distribution(
+                topic_counts,
+                figure_dir,
+                f"{figure_base_name or base_name}_topic_before_distribution_top20.pdf",
+            )
+        return
+
     # Create mapping from topic to document indices
     topic_to_indices = {}
     for idx, topic_id in enumerate(dominant_topics):
@@ -347,7 +361,15 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
         filtered_indices.extend(sampled_indices)
     log.info(f"Topic {topic_id}: {len(indices)} → keep {target_n}")
     
-    filtered_data = [original_data[idx] for idx in sorted(filtered_indices)]
+    filtered_data = _select_records_in_input_order(original_data, filtered_indices)
+
+    if figure_dir:
+        _plot_topic_distributions(
+            dominant_topics,
+            filtered_indices,
+            figure_dir,
+            figure_base_name or base_name,
+        )
     
     if output_path is None:
         instruct_gen_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -368,6 +390,54 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
     
     log.info(f"Filtered data saved to: {output_path}")
+
+
+def _plot_topic_distribution(topic_counts, figure_dir, filename):
+    """Save a bar chart for the 20 most frequent dominant topics."""
+    top_topics = topic_counts.most_common(20)
+    topic_ids = [topic_id for topic_id, _ in top_topics]
+    counts = [count for _, count in top_topics]
+
+    os.makedirs(figure_dir, exist_ok=True)
+    plt.figure(figsize=(8, 5))
+    bars = plt.bar(range(len(topic_ids)), counts, color="mediumseagreen")
+    plt.xlabel("Topic ID")
+    plt.ylabel("Number of Samples")
+    plt.xticks(range(len(topic_ids)), topic_ids)
+    plt.grid(axis="y", linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    for bar, count in zip(bars, counts):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            str(count),
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
+    plt.savefig(os.path.join(figure_dir, filename))
+    plt.close()
+
+
+def _plot_topic_distributions(
+    dominant_topics, filtered_indices, figure_dir, figure_base_name
+):
+    """Plot topic counts before and after sampling from one topic assignment."""
+    _plot_topic_distribution(
+        Counter(dominant_topics),
+        figure_dir,
+        f"{figure_base_name}_topic_before_distribution_top20.pdf",
+    )
+    _plot_topic_distribution(
+        Counter(dominant_topics[idx] for idx in filtered_indices),
+        figure_dir,
+        f"{figure_base_name}_topic_after_distribution_top20.pdf",
+    )
+
+
+def _select_records_in_input_order(original_data, selected_indices):
+    """Return selected records while preserving their input order."""
+    return [original_data[idx] for idx in sorted(selected_indices)]
 
 
 def diff_analysis(old_code, new_code, context=3):
@@ -427,6 +497,9 @@ def compute_diff_statistics(jsonl_path, figure_dir="statistic_figure", **kwargs)
         **kwargs: Additional keyword arguments:
             - bin_width_modified (int, optional): Bin width for modified lines histogram. Defaults to 5.
             - bin_width_hunk (int, optional): Bin width for hunk number histogram. Defaults to 1.
+            - old_code_field (str, optional): Pre-edit code field. Defaults to "old_code".
+            - new_code_field (str, optional): Post-edit code field. Defaults to "new_code".
+            - filename_prefix (str, optional): Prefix for generated PDF filenames.
     Returns:
         dict: A dictionary containing statistics for modified lines and hunk numbers:
             {
@@ -451,11 +524,14 @@ def compute_diff_statistics(jsonl_path, figure_dir="statistic_figure", **kwargs)
     hunk_num_list = []
     hunk_num_list_1 = []
 
+    old_code_field = kwargs.get("old_code_field", "old_code")
+    new_code_field = kwargs.get("new_code_field", "new_code")
+
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in tqdm(f, desc="Analyzing code diffs"):
             data = json.loads(line)
-            old_code = data.get("old_code", "")
-            new_code = data.get("new_code", "")
+            old_code = data.get(old_code_field, "")
+            new_code = data.get(new_code_field, "")
             diff_stats = diff_analysis(old_code, new_code)
             diff_stats_list.append(diff_stats)
             modified_list.append(diff_stats["modified"] + diff_stats["added"] + diff_stats["removed"])
@@ -492,29 +568,34 @@ def compute_diff_statistics(jsonl_path, figure_dir="statistic_figure", **kwargs)
     bin_width_hunk = kwargs.get('bin_width_hunk', 1)
     os.makedirs(fig_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(jsonl_path))[0]
+    filename_prefix = kwargs.get("filename_prefix", base_name)
 
     # Modified lines distribution
     plt.figure(figsize=(8, 5))
-    modified_bins = np.arange(0, max(modified_list) + bin_width_modified, bin_width_modified)
+    modified_bins = np.arange(
+        0, max(max(modified_list), bin_width_modified) + bin_width_modified, bin_width_modified
+    )
     plt.hist(modified_list, bins=modified_bins, color="skyblue", edgecolor="black", linewidth=0.3)
     plt.xlabel("Modified Lines")
     plt.ylabel("Number of Samples")
     # plt.title(f"{base_name} Modified Lines Distribution")
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f"{base_name}_modified_lines_hist.pdf"))
+    plt.savefig(os.path.join(fig_dir, f"{filename_prefix}_modified_lines_hist.pdf"))
     plt.close()
 
     # Hunk number distribution
     plt.figure(figsize=(8, 5))
-    hunk_bins = np.arange(0, max(hunk_num_list) + bin_width_hunk, bin_width_hunk)
+    hunk_bins = np.arange(
+        0, max(max(hunk_num_list), bin_width_hunk) + bin_width_hunk, bin_width_hunk
+    )
     plt.hist(hunk_num_list, bins=hunk_bins, color="salmon", edgecolor="black", linewidth=0.3)
     plt.xlabel("Number of Hunks")
     plt.ylabel("Number of Samples")
     # plt.title(f"{base_name} Hunk Number Distribution")
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f"{base_name}_hunk_num_hist.pdf"))
+    plt.savefig(os.path.join(fig_dir, f"{filename_prefix}_hunk_num_hist.pdf"))
     plt.close()
 
     return {
@@ -548,6 +629,10 @@ def plot_verb_object_sunburst(
     border_width: float = 0.5,
     border_color: str = "white",
 ):
+    import pandas as pd
+    import plotly.express as px
+    import spacy
+
     # 1. Load NLP model
     try:
         nlp = spacy.load(lang)
