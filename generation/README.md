@@ -492,7 +492,7 @@ statistics:
   output_dir: "data/filtered/statistics"
 ```
 
-When diff plots are enabled, the script writes modified-line and hunk histograms for both the original input (`diff_before`) and the data retained by diff filtering (`diff_after`). When topic plots are enabled, it writes the top-20 dominant-topic distributions before and after topic-balanced sampling. It also logs those topics in descending sample-count order and writes a text report containing each topic's sample count and 10 highest-weight words. The topic model is fitted or loaded only once; the before/after outputs use the same topic assignments. With both options enabled, the following files are created under `output_dir`, using the input JSONL basename as `<name>`:
+When diff plots are enabled, the script writes modified-line and hunk histograms for both the original input (`diff_before`) and the data retained by diff filtering (`diff_after`). When topic plots are enabled, it writes the top-20 dominant-topic distributions before and after topic-balanced sampling. It also logs those topics in descending sample-count order and writes a text report containing each topic's sample count and 10 highest-weight words. The topic model is fitted or loaded only once; the before/after outputs use the same topic assignments. In `filter` mode with both options enabled, the following files are created under `output_dir`, using the input JSONL basename as `<name>`:
 
 ```text
 <name>_diff_before_modified_lines_hist.pdf
@@ -505,7 +505,7 @@ When diff plots are enabled, the script writes modified-line and hunk histograms
 <name>_topic_after_top20_words.txt
 ```
 
-In `analyze_only` mode, both analyses use the original input. Only the two `diff_before` PDFs, the `topic_before` PDF, and the corresponding `topic_before` text report selected by the distribution switches are created. Topic analysis may still create or reuse the HDP `.joblib` cache controlled by `filter_settings.refit`.
+In `analyze_only` mode, both analyses use the original input. The enabled outputs are the two `diff_before` PDFs plus `<name>_topic_original_distribution_top20.pdf` and `<name>_topic_original_top20_words.txt`. Topic analysis may still create or reuse the HDP `.joblib` cache controlled by `filter_settings.refit`.
 
 
 ## Finetune dataset construction

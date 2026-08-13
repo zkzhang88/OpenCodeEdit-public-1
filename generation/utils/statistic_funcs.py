@@ -296,17 +296,11 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
 
     if analysis_only:
         if figure_dir:
-            _plot_topic_distribution(
-                topic_counts,
-                figure_dir,
-                f"{figure_base_name or base_name}_topic_before_distribution_top20.pdf",
-            )
-            _write_topic_summary(
+            _write_original_topic_outputs(
                 hdp_model,
                 topic_counts,
                 figure_dir,
-                f"{figure_base_name or base_name}_topic_before_top20_words.txt",
-                stage="before",
+                figure_base_name or base_name,
             )
         return
 
@@ -450,6 +444,24 @@ def _plot_topic_distributions(
         Counter(dominant_topics[idx] for idx in filtered_indices),
         figure_dir,
         f"{figure_base_name}_topic_after_distribution_top20.pdf",
+    )
+
+
+def _write_original_topic_outputs(
+    hdp_model, topic_counts, output_dir, figure_base_name
+):
+    """Write topic distribution outputs for the unfiltered original input."""
+    _plot_topic_distribution(
+        topic_counts,
+        output_dir,
+        f"{figure_base_name}_topic_original_distribution_top20.pdf",
+    )
+    _write_topic_summary(
+        hdp_model,
+        topic_counts,
+        output_dir,
+        f"{figure_base_name}_topic_original_top20_words.txt",
+        stage="original",
     )
 
 

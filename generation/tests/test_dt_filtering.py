@@ -330,6 +330,33 @@ class DistributionPlotTests(unittest.TestCase):
             (self.root / "records_topic_after_distribution_top20.pdf").is_file()
         )
 
+    def test_analysis_only_topic_outputs_use_original_stage_names(self):
+        model = mock.Mock()
+        topic_counts = statistic_funcs.Counter({4: 5, 7: 2})
+
+        with (
+            mock.patch.object(
+                statistic_funcs, "_plot_topic_distribution"
+            ) as plot_distribution,
+            mock.patch.object(statistic_funcs, "_write_topic_summary") as write_summary,
+        ):
+            statistic_funcs._write_original_topic_outputs(
+                model, topic_counts, str(self.root), "records"
+            )
+
+        plot_distribution.assert_called_once_with(
+            topic_counts,
+            str(self.root),
+            "records_topic_original_distribution_top20.pdf",
+        )
+        write_summary.assert_called_once_with(
+            model,
+            topic_counts,
+            str(self.root),
+            "records_topic_original_top20_words.txt",
+            stage="original",
+        )
+
     def test_topic_summary_orders_by_sample_count_and_includes_top_words(self):
         model = mock.Mock()
         model.show_topic.side_effect = lambda topic_id, topn: [
