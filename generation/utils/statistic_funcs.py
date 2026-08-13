@@ -297,6 +297,13 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
                 figure_dir,
                 f"{figure_base_name or base_name}_topic_before_distribution_top20.pdf",
             )
+            _write_topic_summary(
+                hdp_model,
+                topic_counts,
+                figure_dir,
+                f"{figure_base_name or base_name}_topic_before_top20_words.txt",
+                stage="before",
+            )
         return
 
     # Create mapping from topic to document indices
@@ -370,6 +377,13 @@ def filter_data_by_hdp_topic_analysis(jsonl_path, field_name, data_format, max_s
             figure_dir,
             figure_base_name or base_name,
         )
+        _write_topic_summaries(
+            hdp_model,
+            dominant_topics,
+            filtered_indices,
+            figure_dir,
+            figure_base_name or base_name,
+        )
     
     if output_path is None:
         instruct_gen_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -432,6 +446,72 @@ def _plot_topic_distributions(
         Counter(dominant_topics[idx] for idx in filtered_indices),
         figure_dir,
         f"{figure_base_name}_topic_after_distribution_top20.pdf",
+    )
+
+
+def _format_topic_words(hdp_model, topic_id, num_words=10):
+    """Format the most probable words and weights for one HDP topic."""
+    if topic_id == -1:
+        return "no topic assigned"
+    return " + ".join(
+        f"{weight:.6f}*{word}"
+        for word, weight in hdp_model.show_topic(topic_id, topn=num_words)
+    )
+
+
+def _write_topic_summary(
+    hdp_model,
+    topic_counts,
+    output_dir,
+    filename,
+    stage,
+    top_n=20,
+    num_words=10,
+):
+    """Log and save the most populated topics with their representative words."""
+    os.makedirs(output_dir, exist_ok=True)
+    lines = [
+        f"stage: {stage}",
+        f"total_samples: {sum(topic_counts.values())}",
+        f"topics_shown: {min(top_n, len(topic_counts))}",
+        f"words_per_topic: {num_words}",
+        "",
+    ]
+
+    log.info("Top %d topics by sample count (%s):", top_n, stage)
+    for rank, (topic_id, count) in enumerate(topic_counts.most_common(top_n), 1):
+        words = _format_topic_words(hdp_model, topic_id, num_words=num_words)
+        line = f"{rank}. Topic {topic_id}: {count} samples | {words}"
+        lines.append(line)
+        log.info(line)
+
+    output_path = os.path.join(output_dir, filename)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    log.info("Topic summary saved to: %s", output_path)
+
+
+def _write_topic_summaries(
+    hdp_model,
+    dominant_topics,
+    filtered_indices,
+    output_dir,
+    figure_base_name,
+):
+    """Save before/after topic summaries from the same topic assignment."""
+    _write_topic_summary(
+        hdp_model,
+        Counter(dominant_topics),
+        output_dir,
+        f"{figure_base_name}_topic_before_top20_words.txt",
+        stage="before",
+    )
+    _write_topic_summary(
+        hdp_model,
+        Counter(dominant_topics[idx] for idx in filtered_indices),
+        output_dir,
+        f"{figure_base_name}_topic_after_top20_words.txt",
+        stage="after",
     )
 
 

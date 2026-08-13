@@ -330,6 +330,66 @@ class DistributionPlotTests(unittest.TestCase):
             (self.root / "records_topic_after_distribution_top20.pdf").is_file()
         )
 
+    def test_topic_summary_orders_by_sample_count_and_includes_top_words(self):
+        model = mock.Mock()
+        model.show_topic.side_effect = lambda topic_id, topn: [
+            (f"word_{topic_id}_{index}", 0.5 / (index + 1))
+            for index in range(topn)
+        ]
+
+        with self.assertLogs(statistic_funcs.log, level="INFO") as captured_logs:
+            statistic_funcs._write_topic_summary(
+                model,
+                statistic_funcs.Counter({7: 2, 4: 5}),
+                str(self.root),
+                "records_topic_before_top20_words.txt",
+                stage="before",
+            )
+
+        report = (
+            self.root / "records_topic_before_top20_words.txt"
+        ).read_text(encoding="utf-8")
+        self.assertLess(report.index("Topic 4: 5 samples"), report.index("Topic 7: 2 samples"))
+        self.assertIn("0.500000*word_4_0", report)
+        self.assertIn("0.050000*word_4_9", report)
+        self.assertEqual(model.show_topic.call_count, 2)
+        self.assertTrue(any("Topic 4: 5 samples" in line for line in captured_logs.output))
+
+    def test_topic_summary_handles_unassigned_documents(self):
+        model = mock.Mock()
+        statistic_funcs._write_topic_summary(
+            model,
+            statistic_funcs.Counter({-1: 3}),
+            str(self.root),
+            "records_topic_before_top20_words.txt",
+            stage="before",
+        )
+
+        report = (
+            self.root / "records_topic_before_top20_words.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Topic -1: 3 samples | no topic assigned", report)
+        model.show_topic.assert_not_called()
+
+    def test_topic_summary_helper_writes_before_and_after_reports(self):
+        model = mock.Mock()
+        model.show_topic.return_value = [("representative", 0.75)]
+
+        statistic_funcs._write_topic_summaries(
+            model,
+            [1, 1, 2],
+            [0, 2],
+            str(self.root),
+            "records",
+        )
+
+        before = self.root / "records_topic_before_top20_words.txt"
+        after = self.root / "records_topic_after_top20_words.txt"
+        self.assertTrue(before.is_file())
+        self.assertTrue(after.is_file())
+        self.assertIn("Topic 1: 2 samples", before.read_text(encoding="utf-8"))
+        self.assertIn("Topic 1: 1 samples", after.read_text(encoding="utf-8"))
+
     def test_selected_records_preserve_input_order(self):
         records = [{"id": 0}, {"id": 1}, {"id": 2}]
         selected = statistic_funcs._select_records_in_input_order(records, [2, 0])
