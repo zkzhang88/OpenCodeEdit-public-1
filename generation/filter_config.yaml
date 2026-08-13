@@ -1,5 +1,5 @@
 # Path to the input JSONL file containing data samples
-jsonl_path: "data/ocedata_mix_descriptive.jsonl"  
+jsonl_path: "data/ocedata_mix.jsonl"  
 
 # List of field names to extract instruction content (do not change this if unsure)
 field_name: ["code_before_purify", "instruct_purify"]  
@@ -8,7 +8,7 @@ field_name: ["code_before_purify", "instruct_purify"]
 data_format: "general"
 
 # Run the complete pipeline ("filter") or only analyze the original input ("analyze_only")
-run_mode: "filter"
+run_mode: "analyze_only"
 
 # Seed for random operations to ensure reproducibility
 random_seed: 42  
@@ -27,8 +27,8 @@ filter_settings:
 # Optional distribution plots (disabled by default)
 statistics:
   # Plot modified-line and hunk distributions before and after diff filtering
-  output_diff_distribution: false
+  output_diff_distribution: true
   # Plot dominant-topic distributions before and after topic sampling
-  output_topic_distribution: false
+  output_topic_distribution: true
   # Directory for generated PDF files
   output_dir: "data/filtered/statistics"
