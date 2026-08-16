@@ -8,7 +8,7 @@ field_name: ["code_before_purify", "instruct_purify"]
 data_format: "general"
 
 # Run the complete pipeline ("filter") or only analyze the original input ("analyze_only")
-run_mode: "analyze_only"
+run_mode: "filter"
 
 # Seed for random operations to ensure reproducibility
 random_seed: 42  
@@ -18,9 +18,9 @@ filter_settings:
   # Maximum number of modified lines allowed per sample
   max_modify_lines: 70
   # Maximum number of hunks allowed per sample
-  max_hunk_num: 7
+  max_hunk_num: 99  # No hunk filtering any more
   # Maximum total number of samples after filtering
-  max_samples_total: 10000
+  max_samples_total: 20000
   # Whether to refit the HDP topic model
   refit: false
 
