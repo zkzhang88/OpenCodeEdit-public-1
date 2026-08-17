@@ -151,7 +151,7 @@ class SplitInstructionsTests(unittest.TestCase):
                     "--input-file",
                     str(custom_input),
                     "--model-name",
-                    "deepseek-v3",
+                    "qwen3",
                     "--descriptive-file",
                     str(descriptive_file),
                     "--lazy-file",
@@ -166,9 +166,9 @@ class SplitInstructionsTests(unittest.TestCase):
         )
         self.assertEqual(
             read_jsonl(descriptive_file)[0]["instr_type"],
-            "deepseek-v3_descriptive",
+            "qwen3_descriptive",
         )
-        self.assertEqual(read_jsonl(lazy_file)[0]["instr_type"], "deepseek-v3_lazy")
+        self.assertEqual(read_jsonl(lazy_file)[0]["instr_type"], "qwen3_lazy")
 
     def test_rejects_invalid_input_without_final_outputs(self):
         cases = {
@@ -212,7 +212,14 @@ class SplitInstructionsTests(unittest.TestCase):
                 self.assertEqual(list(case_root.glob(".*.tmp")), [])
 
     def test_rejects_invalid_model_names_path_conflicts_and_existing_outputs(self):
-        for model_name in ("", "../ds", "deepseek/v3", " ds", "模型"):
+        for model_name in (
+            "",
+            "../ds",
+            "deepseek/v3",
+            "deepseek-v3",
+            " ds",
+            "模型",
+        ):
             with self.subTest(model_name=model_name):
                 with self.assertRaisesRegex(ValueError, "model_name"):
                     split_instructions(

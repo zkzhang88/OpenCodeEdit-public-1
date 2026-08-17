@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 from typing import Any, Iterator, Sequence
@@ -16,7 +15,7 @@ from typing import Any, Iterator, Sequence
 
 DEFAULT_DESCRIPTIVE_FIELD = "instruct_descriptive_purify"
 DEFAULT_LAZY_FIELD = "instruct_lazy_purify"
-MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MODEL_NAMES = ("ds", "qwen3")
 
 
 def _default_output_path(input_file: Path, variant: str) -> Path:
@@ -24,11 +23,8 @@ def _default_output_path(input_file: Path, variant: str) -> Path:
 
 
 def _validate_model_name(model_name: str) -> str:
-    if not isinstance(model_name, str) or not MODEL_NAME_PATTERN.fullmatch(model_name):
-        raise ValueError(
-            "model_name must be a non-empty label containing only ASCII letters, "
-            "digits, '.', '_', or '-', and must start with a letter or digit"
-        )
+    if model_name not in MODEL_NAMES:
+        raise ValueError(f"model_name must be one of: {', '.join(MODEL_NAMES)}")
     return model_name
 
 
@@ -258,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--input-file", type=Path, required=True)
-    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--model-name", choices=MODEL_NAMES, required=True)
     parser.add_argument("--descriptive-file", type=Path)
     parser.add_argument("--lazy-file", type=Path)
     parser.add_argument(
