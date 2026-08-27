@@ -1,8 +1,10 @@
-"""Detect token n-gram overlap between CommitPackFT and code-edit benchmarks.
+"""Detect token n-gram overlap between seed data and code-edit benchmarks.
 
-The script compares CommitPackFT ``old_contents`` with Python code fields from
-CanItEdit and each CodeEditorBench subset.  Results are reported independently
-for every subset; no aggregate CodeEditorBench contamination rate is computed.
+The seed data can be CommitPackFT ``old_contents`` or the ``code_before`` field
+from the generation one-shot examples.  It is compared with Python code fields
+from CanItEdit and each CodeEditorBench subset.  Results are reported
+independently for every subset; no aggregate CodeEditorBench contamination rate
+is computed.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 
 DEFAULT_COMMITPACK = Path("generation/data/commitpackft_python_cleaned.jsonl")
+DEFAULT_ONESHOT = Path("generation/few-shot/1-shot-prompt_final_chose.jsonl")
 DEFAULT_CANITEDIT = Path(
     "benchmark/data/CanItEdit/test-00000-of-00001.parquet"
 )
@@ -86,7 +89,9 @@ class BenchmarkField:
 
 @dataclass
 class SeedRecord:
+    source: str
     line_number: int
+    field_name: str
     commit: str
     repo: str
     old_file: str
@@ -401,14 +406,27 @@ def load_all_benchmark_fields(
 
 
 def _seed_from_row(
-    line_number: int, row: Dict[str, object]
+    line_number: int, row: Dict[str, object], source: str
 ) -> SeedRecord:
-    tokenized = tokenize_code(row.get("old_contents", ""))
+    if source == "commitpack":
+        field_name = "old_contents"
+        code = row.get(field_name, "")
+    elif source == "oneshot":
+        field_name = "code_before"
+        code = row.get(field_name, "")
+    else:
+        raise ValueError(f"Unsupported seed source: {source}")
+
+    tokenized = tokenize_code(code)
     return SeedRecord(
+        source=source,
         line_number=line_number,
-        commit=str(row.get("commit", "")),
-        repo=str(row.get("repos", "")),
-        old_file=str(row.get("old_file", "")),
+        field_name=field_name,
+        commit=str(row.get("commit", "")) if source == "commitpack" else "",
+        repo=str(row.get("repos", "")) if source == "commitpack" else "",
+        old_file=(
+            str(row.get("old_file", "")) if source == "commitpack" else ""
+        ),
         tokens=tokenized.tokens,
         lexer_fallback=tokenized.fallback,
     )
@@ -436,14 +454,17 @@ def _candidate_for_pair(
     )
 
 
-def scan_commitpack(
-    commitpack_path: Path,
+def scan_seed_file(
+    seed_path: Path,
     fields: Sequence[BenchmarkField],
     ngram_size: int,
     top_k: int,
+    seed_source: str,
 ) -> Tuple[Dict[int, List[Candidate]], int]:
     if top_k <= 0:
         raise ValueError("top_k must be positive")
+    if seed_source not in {"commitpack", "oneshot"}:
+        raise ValueError(f"Unsupported seed source: {seed_source}")
 
     inverted: Dict[Tuple[str, ...], List[int]] = defaultdict(list)
     short_fields: List[int] = []
@@ -460,9 +481,9 @@ def scan_commitpack(
     field_by_id = {benchmark.field_id: benchmark for benchmark in fields}
     scanned = 0
 
-    for line_number, row in _iter_jsonl(commitpack_path):
+    for line_number, row in _iter_jsonl(seed_path):
         scanned += 1
-        seed = _seed_from_row(line_number, row)
+        seed = _seed_from_row(line_number, row, seed_source)
         seed_ngrams = unique_ngrams(seed.tokens, ngram_size)
         shared_counts: Counter[int] = Counter()
         for ngram in seed_ngrams:
@@ -508,6 +529,19 @@ def scan_commitpack(
         for field_id, heap in heaps.items()
     }
     return ranked, scanned
+
+
+def scan_commitpack(
+    commitpack_path: Path,
+    fields: Sequence[BenchmarkField],
+    ngram_size: int,
+    top_k: int,
+) -> Tuple[Dict[int, List[Candidate]], int]:
+    """Compatibility wrapper for scanning CommitPackFT seeds."""
+
+    return scan_seed_file(
+        commitpack_path, fields, ngram_size, top_k, "commitpack"
+    )
 
 
 def _is_contaminated(candidate: Optional[Candidate], threshold: float) -> bool:
@@ -560,6 +594,7 @@ def write_results(
     threshold: float,
     top_k: int,
     scanned_seeds: int,
+    seed_source: str = "commitpack",
 ) -> List[Dict[str, object]]:
     fields_by_subset: Dict[str, List[BenchmarkField]] = defaultdict(list)
     for benchmark in fields:
@@ -586,7 +621,14 @@ def write_results(
                         "task_id": benchmark.task_id,
                         "benchmark_field": benchmark.field_name,
                         "rank": rank,
-                        "commitpack_line": candidate.seed.line_number,
+                        "seed_source": candidate.seed.source,
+                        "seed_line": candidate.seed.line_number,
+                        "seed_field": candidate.seed.field_name,
+                        "commitpack_line": (
+                            candidate.seed.line_number
+                            if candidate.seed.source == "commitpack"
+                            else None
+                        ),
                         "commit": candidate.seed.commit,
                         "repo": candidate.seed.repo,
                         "old_file": candidate.seed.old_file,
@@ -716,7 +758,14 @@ def write_results(
                 contaminated_tasks / total_tasks if total_tasks else 0.0
             ),
             "total_code_fields": len(subset_fields),
-            "scanned_commitpack_seeds": scanned_seeds,
+            "seed_source": seed_source,
+            "scanned_seed_records": scanned_seeds,
+            "scanned_commitpack_seeds": (
+                scanned_seeds if seed_source == "commitpack" else 0
+            ),
+            "scanned_oneshot_seeds": (
+                scanned_seeds if seed_source == "oneshot" else 0
+            ),
             "ngram_size": ngram_size,
             "threshold": threshold,
             "top_k": top_k,
@@ -766,12 +815,15 @@ def run_detection(
     ngram_size: int = 10,
     threshold: float = 0.8,
     top_k: int = 5,
+    seed_source: str = "commitpack",
+    oneshot_path: Path = DEFAULT_ONESHOT,
 ) -> List[Dict[str, object]]:
     fields = load_all_benchmark_fields(
         canitedit_path, codeeditor_dir, ngram_size
     )
-    candidates, scanned = scan_commitpack(
-        commitpack_path, fields, ngram_size, top_k
+    seed_path = commitpack_path if seed_source == "commitpack" else oneshot_path
+    candidates, scanned = scan_seed_file(
+        seed_path, fields, ngram_size, top_k, seed_source
     )
     return write_results(
         fields,
@@ -781,6 +833,7 @@ def run_detection(
         threshold,
         top_k,
         scanned,
+        seed_source,
     )
 
 
@@ -792,6 +845,8 @@ def run_multi_detection(
     ngram_sizes: Sequence[int] = DEFAULT_NGRAM_SIZES,
     threshold: float = 0.8,
     top_k: int = 5,
+    seed_source: str = "commitpack",
+    oneshot_path: Path = DEFAULT_ONESHOT,
 ) -> List[Dict[str, object]]:
     """Run independent scans for multiple n-gram sizes.
 
@@ -815,6 +870,8 @@ def run_multi_detection(
             ngram_size=ngram_size,
             threshold=threshold,
             top_k=top_k,
+            seed_source=seed_source,
+            oneshot_path=oneshot_path,
         )
         for row in rows:
             combined_rows.append({"ngram_size": ngram_size, **row})
@@ -841,16 +898,40 @@ def run_multi_detection(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Check CommitPackFT old_contents for token n-gram overlap with "
-            "CanItEdit and individual CodeEditorBench subsets."
-        )
+            "Check CommitPackFT old_contents or one-shot code_before for "
+            "token n-gram overlap with CanItEdit and individual "
+            "CodeEditorBench subsets."
+        ),
+        epilog=(
+            "Example:\n"
+            "  python benchmark/check_ngram_contamination.py "
+            "--seed-source oneshot\n"
+            "  python benchmark/check_ngram_contamination.py "
+            "--seed-source oneshot --ngram-size 10 "
+            "--output-dir /tmp/oneshot-contamination"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--seed-source",
+        choices=("commitpack", "oneshot"),
+        default="commitpack",
+        help="seed data to scan (default: commitpack)",
     )
     parser.add_argument("--commitpack", type=Path, default=DEFAULT_COMMITPACK)
+    parser.add_argument("--oneshot", type=Path, default=DEFAULT_ONESHOT)
     parser.add_argument("--canitedit", type=Path, default=DEFAULT_CANITEDIT)
     parser.add_argument(
         "--codeeditor-dir", type=Path, default=DEFAULT_CODEEDITOR_DIR
     )
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "result directory (default: benchmark/data/contamination_results "
+            "for CommitPackFT, with /oneshot appended for one-shot seeds)"
+        ),
+    )
     ngram_group = parser.add_mutually_exclusive_group()
     ngram_group.add_argument(
         "--ngram-size",
@@ -868,8 +949,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def default_output_dir(seed_source: str) -> Path:
+    if seed_source == "commitpack":
+        return DEFAULT_OUTPUT_DIR
+    if seed_source == "oneshot":
+        return DEFAULT_OUTPUT_DIR / "oneshot"
+    raise ValueError(f"Unsupported seed source: {seed_source}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    output_dir = args.output_dir or default_output_dir(args.seed_source)
     ngram_sizes = (
         [args.ngram_size]
         if args.ngram_size is not None
@@ -888,10 +978,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 commitpack_path=args.commitpack,
                 canitedit_path=args.canitedit,
                 codeeditor_dir=args.codeeditor_dir,
-                output_dir=args.output_dir,
+                output_dir=output_dir,
                 ngram_size=args.ngram_size,
                 threshold=args.threshold,
                 top_k=args.top_k,
+                seed_source=args.seed_source,
+                oneshot_path=args.oneshot,
             )
         ]
     else:
@@ -899,10 +991,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             commitpack_path=args.commitpack,
             canitedit_path=args.canitedit,
             codeeditor_dir=args.codeeditor_dir,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             ngram_sizes=ngram_sizes,
             threshold=args.threshold,
             top_k=args.top_k,
+            seed_source=args.seed_source,
+            oneshot_path=args.oneshot,
         )
     for row in rows:
         print(

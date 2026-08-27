@@ -8,13 +8,17 @@ import pyarrow.parquet as pq
 from benchmark.check_ngram_contamination import (
     BenchmarkField,
     CODEEDITOR_FILES,
+    DEFAULT_OUTPUT_DIR,
     SUBSET_ORDER,
+    build_parser,
     compute_metrics,
+    default_output_dir,
     exact_containment,
     load_codeeditor_file,
     run_detection,
     run_multi_detection,
     scan_commitpack,
+    scan_seed_file,
     tokenize_code,
     unique_ngrams,
 )
@@ -115,6 +119,67 @@ def test_scan_keeps_top_k_in_stable_metric_order(tmp_path):
     ranks = [candidate.rank() for candidate in candidates[0]]
     assert ranks == sorted(ranks, reverse=True)
     assert all(candidate.exact_containment for candidate in candidates[0])
+
+
+def test_oneshot_scan_uses_only_code_before_and_tracks_source(tmp_path):
+    benchmark_tokens = tokenize_code("def add(a, b): return a + b").tokens
+    field = BenchmarkField(
+        field_id=0,
+        subset="canitedit_test",
+        task_id="1",
+        field_name="before",
+        tokens=benchmark_tokens,
+        lexer_fallback=False,
+        ngrams=unique_ngrams(benchmark_tokens, 3),
+    )
+    oneshot = tmp_path / "oneshot.jsonl"
+    _write_jsonl(
+        oneshot,
+        [
+            {
+                "code_before": "def unrelated(): return None",
+                "code_after": "def add(a, b): return a + b",
+                "code_after_purify": "def add(a, b): return a + b",
+            },
+            {
+                "code_before": "def add(a, b): return a + b",
+                "code_after": "def add(a, b): return a - b",
+            },
+        ],
+    )
+
+    candidates, scanned = scan_seed_file(
+        oneshot, [field], 3, top_k=1, seed_source="oneshot"
+    )
+
+    assert scanned == 2
+    assert len(candidates[0]) == 1
+    seed = candidates[0][0].seed
+    assert seed.source == "oneshot"
+    assert seed.line_number == 2
+    assert seed.field_name == "code_before"
+    assert seed.commit == seed.repo == seed.old_file == ""
+
+
+def test_seed_source_has_separate_default_output_directory():
+    assert default_output_dir("commitpack") == DEFAULT_OUTPUT_DIR
+    assert default_output_dir("oneshot") == DEFAULT_OUTPUT_DIR / "oneshot"
+
+
+def test_cli_routes_oneshot_source_and_paths():
+    args = build_parser().parse_args(
+        [
+            "--seed-source",
+            "oneshot",
+            "--oneshot",
+            "custom-oneshot.jsonl",
+            "--output-dir",
+            "custom-results",
+        ]
+    )
+    assert args.seed_source == "oneshot"
+    assert args.oneshot == Path("custom-oneshot.jsonl")
+    assert args.output_dir == Path("custom-results")
 
 
 def test_codeeditor_python_field_mapping(tmp_path):
@@ -273,6 +338,47 @@ def test_end_to_end_writes_nine_independent_subsets(tmp_path):
         rows = list(csv.DictReader(handle))
     assert len(rows) == 9
 
+    oneshot = tmp_path / "oneshot.jsonl"
+    _write_jsonl(
+        oneshot,
+        [{"code_before": shared, "code_after": "def unrelated(): pass"}],
+    )
+    oneshot_output = tmp_path / "oneshot-results"
+    oneshot_index = run_detection(
+        commitpack,
+        canitedit,
+        codeeditor_dir,
+        oneshot_output,
+        ngram_size=3,
+        threshold=0.8,
+        top_k=1,
+        seed_source="oneshot",
+        oneshot_path=oneshot,
+    )
+    assert all(row["contaminated_tasks"] == 1 for row in oneshot_index)
+
+    with (oneshot_output / "canitedit_test" / "matches.jsonl").open(
+        encoding="utf-8"
+    ) as handle:
+        matches = [json.loads(line) for line in handle]
+    before_match = next(
+        row for row in matches if row["benchmark_field"] == "before"
+    )
+    assert before_match["seed_source"] == "oneshot"
+    assert before_match["seed_line"] == 1
+    assert before_match["seed_field"] == "code_before"
+    assert before_match["commitpack_line"] is None
+    assert before_match["commit"] == before_match["repo"] == ""
+
+    with (oneshot_output / "canitedit_test" / "summary.json").open(
+        encoding="utf-8"
+    ) as handle:
+        oneshot_summary = json.load(handle)
+    assert oneshot_summary["seed_source"] == "oneshot"
+    assert oneshot_summary["scanned_seed_records"] == 1
+    assert oneshot_summary["scanned_commitpack_seeds"] == 0
+    assert oneshot_summary["scanned_oneshot_seeds"] == 1
+
 
 def test_multi_detection_reports_each_size_separately(tmp_path):
     commitpack = tmp_path / "commitpack.jsonl"
@@ -350,3 +456,22 @@ def test_multi_detection_reports_each_size_separately(tmp_path):
         rows = list(csv.DictReader(handle))
     assert len(rows) == 18
     assert {row["ngram_size"] for row in rows} == {"2", "4"}
+
+    oneshot = tmp_path / "oneshot.jsonl"
+    _write_jsonl(oneshot, [{"code_before": shared, "code_after": "ignored"}])
+    oneshot_output = tmp_path / "oneshot-results"
+    oneshot_index = run_multi_detection(
+        commitpack,
+        canitedit,
+        codeeditor_dir,
+        oneshot_output,
+        ngram_sizes=[2, 4],
+        threshold=0.8,
+        top_k=1,
+        seed_source="oneshot",
+        oneshot_path=oneshot,
+    )
+    assert len(oneshot_index) == 18
+    assert {row["ngram_size"] for row in oneshot_index} == {2, 4}
+    assert (oneshot_output / "ngram_2" / "summary_index.csv").is_file()
+    assert (oneshot_output / "ngram_4" / "summary_index.csv").is_file()
