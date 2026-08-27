@@ -511,12 +511,19 @@ def load_codeeditor_instruction_file(
         elif subset.startswith(
             ("code_debug_", "code_polishment_", "code_translate_")
         ):
+            title = row.get("title")
+            # Released CodeEditorBench files retain the title column but may
+            # leave it empty. There is no unique natural-language task text to
+            # compare in that case, so omit the field instead of fabricating
+            # the shared inference prompt template.
+            if not isinstance(title, str) or not title.strip():
+                continue
             _add_benchmark_field(
                 fields,
                 subset,
                 task_id,
                 "title",
-                _required_text_field(path, line_number, row, "title"),
+                title,
                 ngram_size,
                 modality="instruction",
             )

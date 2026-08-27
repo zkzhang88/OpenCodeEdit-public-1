@@ -495,6 +495,13 @@ def test_instruction_benchmark_field_mapping_includes_all_languages(tmp_path):
         assert [field.field_name for field in fields] == expected_names
         assert all(field.modality == "instruction" for field in fields)
 
+    empty_title = tmp_path / "code_debug_plus.jsonl"
+    _write_jsonl(
+        empty_title,
+        [{"idx": 6, "code_language": "python", "title": ""}],
+    )
+    assert load_codeeditor_instruction_file(empty_title, 3) == []
+
 
 def test_end_to_end_writes_nine_independent_subsets(tmp_path):
     commitpack = tmp_path / "commitpack.jsonl"
