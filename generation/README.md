@@ -481,6 +481,37 @@ The default `filter` mode runs both filtering stages and writes the intermediate
 
 You can change the file to be filtered in the `filter_config.yaml`. The output file will be stored in the `./data/filtered/` directory, with a `_dt_filtered` suffix.
 
+To export a reproducible, human-reviewable sample from the descriptive and
+lazy DT-filtered datasets, run from the repository root:
+
+```bash
+python3 generation/export_dt_filtered_samples.py
+```
+
+By default, the script samples 384 records with random seed 42, taking 96
+records from each of `ds_descriptive`, `qwen3_descriptive`, `ds_lazy`, and
+`qwen3_lazy`. It reads
+`generation/data/filtered/ocedata_mix_all_descriptive_dt_filtered.jsonl` and
+`generation/data/filtered/ocedata_mix_all_lazy_dt_filtered.jsonl`, then writes
+the result below
+`generation/data/filtered/ocedata_mix_all_dt_filtered_samples/`:
+
+```text
+<instr_type>/line_NNNNNN/
+├── pre_edit.py
+├── post_edit.py
+└── instruction.json
+```
+
+`instruction.json` records the instruction, commit, instruction type, source
+file, and one-based source line number. Its only manual-review field is
+`manual_post_edit_fulfills_instruction`, initially set to JSON `null`.
+Reviewers should replace it with `true` when the post-edit code fulfills the
+edit instruction, or `false` when it does not. Use `--count` to change the
+total sample count (it must be divisible by four), `--seed` to change the
+random sample, `--input-file FILE [FILE ...]` to select other inputs, and
+`--output-dir` to select another export directory.
+
 In HDP modeling process, the analysis results are saved in `*.joblib` files in `./utils/fit_results/` directory, for repetitive running. If you want to rebuild the analysis results, set `refit: true` in `filter_config.yaml`.
 
 Diff and dominant-topic distribution plots are optional and disabled by default. Configure them independently in `filter_config.yaml`:
