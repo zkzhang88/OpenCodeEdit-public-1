@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from benchmark.check_ngram_contamination import (
     BenchmarkField,
@@ -14,12 +15,18 @@ from benchmark.check_ngram_contamination import (
     compute_metrics,
     default_output_dir,
     exact_containment,
+    load_canitedit_instruction_fields,
     load_codeeditor_file,
+    load_codeeditor_instruction_file,
     run_detection,
+    run_generated_detection,
     run_multi_detection,
+    run_multi_generated_detection,
     scan_commitpack,
+    scan_generated_file,
     scan_seed_file,
     tokenize_code,
+    tokenize_instruction,
     unique_ngrams,
 )
 
@@ -29,6 +36,66 @@ def _write_jsonl(path: Path, rows):
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
+
+
+def _write_generated_benchmark_fixture(
+    root: Path, code: str, instruction: str
+):
+    canitedit = root / "canitedit.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "id": [1],
+                "before": [code],
+                "after": [code],
+                "instruction_descriptive": [instruction],
+                "instruction_lazy": [instruction],
+            }
+        ),
+        canitedit,
+    )
+    codeeditor_dir = root / "codeeditor"
+    rows_by_file = {
+        "code_debug_primary.jsonl": [{
+            "idx": 10, "code_language": "python", "title": instruction,
+            "incorrect_solutions": code, "solutions": code,
+        }],
+        "code_debug_plus.jsonl": [{
+            "idx": 11, "code_language": "python", "title": instruction,
+            "incorrect_solutions": code, "solutions": code,
+        }],
+        "code_polishment_primary.jsonl": [{
+            "idx": 12, "source_lang": "python", "title": instruction,
+            "source_code": code,
+        }],
+        "code_polishment_plus.jsonl": [{
+            "idx": 13, "source_lang": "python", "title": instruction,
+            "source_code": code,
+        }],
+        "code_switch_primary.jsonl": [{
+            "idx": 14, "language": "python", "pair_title": ["old", instruction],
+            "target_content": instruction, "similar_source_code": code,
+            "target_source_code": code,
+        }],
+        "code_switch_plus.jsonl": [{
+            "idx": 15, "language": "python", "pair_title": ["old", instruction],
+            "target_content": instruction, "similar_source_code": code,
+            "target_source_code": code,
+        }],
+        "code_translate_primary.jsonl": [{
+            "idx": 16, "source_lang": "python", "target_lang": "java",
+            "title": instruction, "source_code": code,
+            "target_code": "class A {}",
+        }],
+        "code_translate_plus.jsonl": [{
+            "idx": 17, "source_lang": "java", "target_lang": "python",
+            "title": instruction, "source_code": "class A {}",
+            "target_code": code,
+        }],
+    }
+    for filename, rows in rows_by_file.items():
+        _write_jsonl(codeeditor_dir / filename, rows)
+    return canitedit, codeeditor_dir
 
 
 def test_equal_code_has_all_three_maximal_metrics():
@@ -64,6 +131,23 @@ def test_comments_whitespace_and_fences_are_ignored():
     left = tokenize_code("```python\ndef f(x):\n    return x + 1\n```").tokens
     right = tokenize_code("def f( x ): # note\n return x+1").tokens
     assert left == right
+
+
+def test_instruction_tokenization_normalizes_words_and_markdown():
+    left = tokenize_instruction(
+        "## ADD `Cache-Key` support, then 更新缓存！"
+    ).tokens
+    right = tokenize_instruction(
+        "add cache key SUPPORT then 更新缓存"
+    ).tokens
+    assert left == right == (
+        "add",
+        "cache",
+        "key",
+        "support",
+        "then",
+        "更新缓存",
+    )
 
 
 def test_unique_ngrams_do_not_count_repetition_twice():
@@ -161,9 +245,110 @@ def test_oneshot_scan_uses_only_code_before_and_tracks_source(tmp_path):
     assert seed.commit == seed.repo == seed.old_file == ""
 
 
+def test_generated_scan_isolates_three_fields_and_modalities(tmp_path):
+    pre_tokens = tokenize_code("alpha_value = 111").tokens
+    post_tokens = tokenize_code("omega_value = 999").tokens
+    instruction_tokens = tokenize_instruction(
+        "add durable cache invalidation support"
+    ).tokens
+    code_fields = [
+        BenchmarkField(
+            field_id=0,
+            subset="canitedit_test",
+            task_id="1",
+            field_name="before",
+            tokens=pre_tokens,
+            lexer_fallback=False,
+            ngrams=unique_ngrams(pre_tokens, 3),
+        ),
+        BenchmarkField(
+            field_id=1,
+            subset="canitedit_test",
+            task_id="1",
+            field_name="after",
+            tokens=post_tokens,
+            lexer_fallback=False,
+            ngrams=unique_ngrams(post_tokens, 3),
+        ),
+    ]
+    instruction_fields = [
+        BenchmarkField(
+            field_id=0,
+            subset="canitedit_test",
+            task_id="1",
+            field_name="instruction_lazy",
+            tokens=instruction_tokens,
+            lexer_fallback=False,
+            ngrams=unique_ngrams(instruction_tokens, 3),
+            modality="instruction",
+        )
+    ]
+    generated = tmp_path / "generated.jsonl"
+    _write_jsonl(
+        generated,
+        [
+            {
+                "commit": "abc",
+                "instr_type": "qwen3_lazy",
+                "code_before_purify": "alpha_value = 111",
+                "code_after_purify": "placeholder_call()",
+                "instruct_purify": "unrelated editing request",
+            },
+            {
+                "commit": "def",
+                "instr_type": "ds_descriptive",
+                "code_before_purify": "placeholder_call()",
+                "code_after_purify": "omega_value = 999",
+                "instruct_purify": (
+                    "Please add durable cache invalidation support now"
+                ),
+            },
+        ],
+    )
+
+    candidates, scanned = scan_generated_file(
+        generated,
+        {"code": code_fields, "instruction": instruction_fields},
+        ngram_size=3,
+        top_k=1,
+    )
+
+    assert scanned == 2
+    assert candidates["pre_edit"][0][0].exact_containment
+    assert candidates["pre_edit"][0][0].seed.line_number == 1
+    assert candidates["post_edit"][1][0].exact_containment
+    instruction_match = candidates["instruction"][0][0]
+    assert instruction_match.exact_containment
+    assert instruction_match.seed.line_number == 2
+    assert instruction_match.seed.field_name == "instruct_purify"
+    assert instruction_match.seed.instr_type == "ds_descriptive"
+
+
+@pytest.mark.parametrize("bad_value", [None, "", "   ", ["not", "text"]])
+def test_generated_scan_rejects_invalid_required_fields(tmp_path, bad_value):
+    generated = tmp_path / "generated.jsonl"
+    _write_jsonl(
+        generated,
+        [{
+            "code_before_purify": bad_value,
+            "code_after_purify": "value = 2",
+            "instruct_purify": "Update the value.",
+        }],
+    )
+
+    with pytest.raises(ValueError, match="code_before_purify"):
+        scan_generated_file(
+            generated,
+            {"code": [], "instruction": []},
+            ngram_size=3,
+            top_k=1,
+        )
+
+
 def test_seed_source_has_separate_default_output_directory():
     assert default_output_dir("commitpack") == DEFAULT_OUTPUT_DIR
     assert default_output_dir("oneshot") == DEFAULT_OUTPUT_DIR / "oneshot"
+    assert default_output_dir("generated") == DEFAULT_OUTPUT_DIR / "generated"
 
 
 def test_cli_routes_oneshot_source_and_paths():
@@ -180,6 +365,28 @@ def test_cli_routes_oneshot_source_and_paths():
     assert args.seed_source == "oneshot"
     assert args.oneshot == Path("custom-oneshot.jsonl")
     assert args.output_dir == Path("custom-results")
+
+
+def test_cli_routes_generated_source_paths_and_field_overrides():
+    args = build_parser().parse_args(
+        [
+            "--seed-source",
+            "generated",
+            "--generated",
+            "custom-generated.jsonl",
+            "--generated-pre-field",
+            "pre",
+            "--generated-post-field",
+            "post",
+            "--generated-instruction-field",
+            "instruction",
+        ]
+    )
+    assert args.seed_source == "generated"
+    assert args.generated == Path("custom-generated.jsonl")
+    assert args.generated_pre_field == "pre"
+    assert args.generated_post_field == "post"
+    assert args.generated_instruction_field == "instruction"
 
 
 def test_codeeditor_python_field_mapping(tmp_path):
@@ -232,6 +439,61 @@ def test_codeeditor_python_field_mapping(tmp_path):
         ("3", "source_code"),
         ("4", "target_code"),
     ]
+
+
+def test_instruction_benchmark_field_mapping_includes_all_languages(tmp_path):
+    canitedit = tmp_path / "canitedit.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "id": [1],
+                "instruction_descriptive": ["Add validation details."],
+                "instruction_lazy": ["Validate it."],
+            }
+        ),
+        canitedit,
+    )
+    canitedit_fields = load_canitedit_instruction_fields(canitedit, 3)
+    assert [field.field_name for field in canitedit_fields] == [
+        "instruction_descriptive",
+        "instruction_lazy",
+    ]
+    assert all(field.modality == "instruction" for field in canitedit_fields)
+
+    cases = {
+        "code_debug_primary.jsonl": (
+            {"idx": 2, "code_language": "java", "title": "Repair parser"},
+            ["title"],
+        ),
+        "code_polishment_plus.jsonl": (
+            {"idx": 3, "source_lang": "cpp", "title": "Optimize parser"},
+            ["title"],
+        ),
+        "code_translate_primary.jsonl": (
+            {
+                "idx": 4,
+                "source_lang": "java",
+                "target_lang": "cpp",
+                "title": "Translate parser",
+            },
+            ["title"],
+        ),
+        "code_switch_plus.jsonl": (
+            {
+                "idx": 5,
+                "language": "java",
+                "pair_title": ["Old parser", "New parser"],
+                "target_content": "Implement the new parser behavior.",
+            },
+            ["target_title", "target_content"],
+        ),
+    }
+    for filename, (row, expected_names) in cases.items():
+        path = tmp_path / filename
+        _write_jsonl(path, [row])
+        fields = load_codeeditor_instruction_file(path, 3)
+        assert [field.field_name for field in fields] == expected_names
+        assert all(field.modality == "instruction" for field in fields)
 
 
 def test_end_to_end_writes_nine_independent_subsets(tmp_path):
@@ -380,6 +642,79 @@ def test_end_to_end_writes_nine_independent_subsets(tmp_path):
     assert oneshot_summary["scanned_oneshot_seeds"] == 1
 
 
+def test_generated_end_to_end_writes_three_independent_reports(tmp_path):
+    shared_code = "def add(a, b):\n    return a + b\n"
+    shared_instruction = "add durable cache invalidation support"
+    canitedit, codeeditor_dir = _write_generated_benchmark_fixture(
+        tmp_path, shared_code, shared_instruction
+    )
+    generated = tmp_path / "generated.jsonl"
+    _write_jsonl(
+        generated,
+        [{
+            "commit": "abc",
+            "instr_type": "qwen3_lazy",
+            "code_before_purify": shared_code,
+            "code_after_purify": shared_code,
+            "instruct_purify": shared_instruction,
+        }],
+    )
+    output_dir = tmp_path / "generated-results"
+
+    index = run_generated_detection(
+        generated,
+        canitedit,
+        codeeditor_dir,
+        output_dir,
+        ngram_size=3,
+        threshold=0.8,
+        top_k=1,
+    )
+
+    assert len(index) == 27
+    assert {row["seed_field"] for row in index} == {
+        "code_before_purify",
+        "code_after_purify",
+        "instruct_purify",
+    }
+    assert all(row["contaminated_tasks"] == 1 for row in index)
+    for kind in ("pre_edit", "post_edit", "instruction"):
+        for subset in SUBSET_ORDER:
+            assert (output_dir / kind / subset / "matches.jsonl").is_file()
+
+    with (output_dir / "summary_index.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 27
+    assert {row["modality"] for row in summary_rows} == {
+        "code",
+        "instruction",
+    }
+
+    with (
+        output_dir / "instruction" / "canitedit_test" / "matches.jsonl"
+    ).open(encoding="utf-8") as handle:
+        matches = [json.loads(line) for line in handle]
+    assert {row["benchmark_field"] for row in matches} == {
+        "instruction_descriptive",
+        "instruction_lazy",
+    }
+    assert all(row["seed_source"] == "generated" for row in matches)
+    assert all(row["seed_field"] == "instruct_purify" for row in matches)
+    assert all(row["instr_type"] == "qwen3_lazy" for row in matches)
+
+    with (
+        output_dir / "instruction" / "canitedit_test" / "summary.json"
+    ).open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    assert summary["seed_field"] == "instruct_purify"
+    assert summary["modality"] == "instruction"
+    assert summary["scanned_generated_seeds"] == 1
+    assert summary["total_benchmark_fields"] == 2
+    assert summary["total_code_fields"] == 0
+
+
 def test_multi_detection_reports_each_size_separately(tmp_path):
     commitpack = tmp_path / "commitpack.jsonl"
     shared = "def add(a, b): value = a + b; return value"
@@ -475,3 +810,45 @@ def test_multi_detection_reports_each_size_separately(tmp_path):
     assert {row["ngram_size"] for row in oneshot_index} == {2, 4}
     assert (oneshot_output / "ngram_2" / "summary_index.csv").is_file()
     assert (oneshot_output / "ngram_4" / "summary_index.csv").is_file()
+
+
+def test_multi_generated_detection_separates_size_and_seed_field(tmp_path):
+    shared_code = "def add(a, b): return a + b"
+    shared_instruction = "add durable cache invalidation support"
+    canitedit, codeeditor_dir = _write_generated_benchmark_fixture(
+        tmp_path, shared_code, shared_instruction
+    )
+    generated = tmp_path / "generated.jsonl"
+    _write_jsonl(
+        generated,
+        [{
+            "code_before_purify": shared_code,
+            "code_after_purify": shared_code,
+            "instruct_purify": shared_instruction,
+        }],
+    )
+    output_dir = tmp_path / "generated-results"
+
+    index = run_multi_generated_detection(
+        generated,
+        canitedit,
+        codeeditor_dir,
+        output_dir,
+        ngram_sizes=[2, 4],
+        threshold=0.8,
+        top_k=1,
+    )
+
+    assert len(index) == 54
+    assert {row["ngram_size"] for row in index} == {2, 4}
+    assert {row["seed_field"] for row in index} == {
+        "code_before_purify",
+        "code_after_purify",
+        "instruct_purify",
+    }
+    for size in (2, 4):
+        size_dir = output_dir / f"ngram_{size}"
+        assert (size_dir / "summary_index.csv").is_file()
+        assert (size_dir / "pre_edit" / "canitedit_test").is_dir()
+        assert (size_dir / "post_edit" / "canitedit_test").is_dir()
+        assert (size_dir / "instruction" / "canitedit_test").is_dir()

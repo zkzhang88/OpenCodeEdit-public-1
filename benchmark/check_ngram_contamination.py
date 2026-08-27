@@ -1,10 +1,11 @@
 """Detect token n-gram overlap between seed data and code-edit benchmarks.
 
 The seed data can be CommitPackFT ``old_contents`` or the ``code_before`` field
-from the generation one-shot examples.  It is compared with Python code fields
-from CanItEdit and each CodeEditorBench subset.  Results are reported
-independently for every subset; no aggregate CodeEditorBench contamination rate
-is computed.
+from generation one-shot examples. Generated edit triplets can also be checked
+field-by-field. Code is compared with Python benchmark code using lexical
+tokens, while instructions are compared with benchmark task text using
+normalized word tokens. Results are reported independently for every subset;
+no aggregate CodeEditorBench contamination rate is computed.
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 DEFAULT_COMMITPACK = Path("generation/data/commitpackft_python_cleaned.jsonl")
 DEFAULT_ONESHOT = Path("generation/few-shot/1-shot-prompt_final_chose.jsonl")
+DEFAULT_GENERATED = Path("generation/data/ocedata_mix.jsonl")
+DEFAULT_GENERATED_PRE_FIELD = "code_before_purify"
+DEFAULT_GENERATED_POST_FIELD = "code_after_purify"
+DEFAULT_GENERATED_INSTRUCTION_FIELD = "instruct_purify"
 DEFAULT_CANITEDIT = Path(
     "benchmark/data/CanItEdit/test-00000-of-00001.parquet"
 )
@@ -85,6 +90,7 @@ class BenchmarkField:
     tokens: Tuple[str, ...]
     lexer_fallback: bool
     ngrams: frozenset[Tuple[str, ...]] = field(default_factory=frozenset)
+    modality: str = "code"
 
 
 @dataclass
@@ -97,6 +103,7 @@ class SeedRecord:
     old_file: str
     tokens: Tuple[str, ...]
     lexer_fallback: bool
+    instr_type: str = ""
 
 
 @dataclass
@@ -168,6 +175,16 @@ def tokenize_code(code: object) -> TokenizedCode:
         return TokenizedCode(values, fallback=False)
     except (IndentationError, SyntaxError, tokenize.TokenError):
         return TokenizedCode(_fallback_tokenize(text), fallback=True)
+
+
+def tokenize_instruction(instruction: object) -> TokenizedCode:
+    """Normalize natural-language instructions into Unicode word tokens."""
+
+    text = instruction if isinstance(instruction, str) else ""
+    return TokenizedCode(
+        tuple(re.findall(r"\w+", text.casefold(), flags=re.UNICODE)),
+        fallback=False,
+    )
 
 
 def unique_ngrams(
@@ -278,10 +295,16 @@ def _add_benchmark_field(
     subset: str,
     task_id: object,
     field_name: str,
-    code: object,
+    content: object,
     ngram_size: int,
+    modality: str = "code",
 ) -> None:
-    tokenized = tokenize_code(code)
+    if modality == "code":
+        tokenized = tokenize_code(content)
+    elif modality == "instruction":
+        tokenized = tokenize_instruction(content)
+    else:
+        raise ValueError(f"Unsupported benchmark modality: {modality}")
     fields.append(
         BenchmarkField(
             field_id=len(fields),
@@ -291,6 +314,7 @@ def _add_benchmark_field(
             tokens=tokenized.tokens,
             lexer_fallback=tokenized.fallback,
             ngrams=unique_ngrams(tokenized.tokens, ngram_size),
+            modality=modality,
         )
     )
 
@@ -317,6 +341,47 @@ def load_canitedit_fields(
         )
         _add_benchmark_field(
             fields, "canitedit_test", task_id, "after", after, ngram_size
+        )
+    return fields
+
+
+def load_canitedit_instruction_fields(
+    parquet_path: Path, ngram_size: int
+) -> List[BenchmarkField]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pragma: no cover - dependency error path
+        raise RuntimeError(
+            "PyArrow is required to read CanItEdit. "
+            "Install benchmark/requirements.txt."
+        ) from exc
+
+    names = ["id", "instruction_descriptive", "instruction_lazy"]
+    table = pq.read_table(parquet_path, columns=names)
+    data = table.to_pydict()
+    fields: List[BenchmarkField] = []
+    for task_id, descriptive, lazy in zip(
+        data["id"],
+        data["instruction_descriptive"],
+        data["instruction_lazy"],
+    ):
+        _add_benchmark_field(
+            fields,
+            "canitedit_test",
+            task_id,
+            "instruction_descriptive",
+            descriptive,
+            ngram_size,
+            modality="instruction",
+        )
+        _add_benchmark_field(
+            fields,
+            "canitedit_test",
+            task_id,
+            "instruction_lazy",
+            lazy,
+            ngram_size,
+            modality="instruction",
         )
     return fields
 
@@ -389,6 +454,75 @@ def load_codeeditor_file(
     return fields
 
 
+def _required_text_field(
+    path: Path,
+    line_number: int,
+    row: Dict[str, object],
+    field_name: str,
+) -> str:
+    value = row.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{path}:{line_number}: field {field_name!r} must be a "
+            "non-empty string"
+        )
+    return value
+
+
+def load_codeeditor_instruction_file(
+    path: Path, ngram_size: int
+) -> List[BenchmarkField]:
+    """Load unique task text, excluding shared prompt templates and tests."""
+
+    subset = path.stem
+    fields: List[BenchmarkField] = []
+    for line_number, row in _iter_jsonl(path):
+        task_id = row.get("idx", row.get("num", line_number))
+        if subset.startswith("code_switch_"):
+            pair_title = row.get("pair_title")
+            if (
+                not isinstance(pair_title, (list, tuple))
+                or len(pair_title) < 2
+                or not isinstance(pair_title[1], str)
+                or not pair_title[1].strip()
+            ):
+                raise ValueError(
+                    f"{path}:{line_number}: field 'pair_title[1]' must be "
+                    "a non-empty string"
+                )
+            _add_benchmark_field(
+                fields,
+                subset,
+                task_id,
+                "target_title",
+                pair_title[1],
+                ngram_size,
+                modality="instruction",
+            )
+            _add_benchmark_field(
+                fields,
+                subset,
+                task_id,
+                "target_content",
+                _required_text_field(path, line_number, row, "target_content"),
+                ngram_size,
+                modality="instruction",
+            )
+        elif subset.startswith(
+            ("code_debug_", "code_polishment_", "code_translate_")
+        ):
+            _add_benchmark_field(
+                fields,
+                subset,
+                task_id,
+                "title",
+                _required_text_field(path, line_number, row, "title"),
+                ngram_size,
+                modality="instruction",
+            )
+    return fields
+
+
 def load_all_benchmark_fields(
     canitedit_path: Path, codeeditor_dir: Path, ngram_size: int
 ) -> List[BenchmarkField]:
@@ -398,6 +532,22 @@ def load_all_benchmark_fields(
         if not path.is_file():
             raise FileNotFoundError(f"Missing CodeEditorBench subset: {path}")
         loaded = load_codeeditor_file(path, ngram_size)
+        offset = len(fields)
+        for local_id, item in enumerate(loaded):
+            item.field_id = offset + local_id
+        fields.extend(loaded)
+    return fields
+
+
+def load_all_benchmark_instruction_fields(
+    canitedit_path: Path, codeeditor_dir: Path, ngram_size: int
+) -> List[BenchmarkField]:
+    fields = load_canitedit_instruction_fields(canitedit_path, ngram_size)
+    for filename in CODEEDITOR_FILES:
+        path = codeeditor_dir / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing CodeEditorBench subset: {path}")
+        loaded = load_codeeditor_instruction_file(path, ngram_size)
         offset = len(fields)
         for local_id, item in enumerate(loaded):
             item.field_id = offset + local_id
@@ -454,6 +604,31 @@ def _candidate_for_pair(
     )
 
 
+def _build_short_field_lookup(
+    fields: Sequence[BenchmarkField],
+) -> Tuple[Dict[Tuple[str, ...], List[int]], Tuple[int, ...]]:
+    lookup: Dict[Tuple[str, ...], List[int]] = defaultdict(list)
+    for benchmark in fields:
+        if not benchmark.ngrams and benchmark.tokens:
+            lookup[benchmark.tokens].append(benchmark.field_id)
+    lengths = tuple(sorted({len(tokens) for tokens in lookup}))
+    return lookup, lengths
+
+
+def _matching_short_field_ids(
+    seed_tokens: Sequence[str],
+    lookup: Dict[Tuple[str, ...], List[int]],
+    lengths: Sequence[int],
+) -> List[int]:
+    matched = set()
+    for length in lengths:
+        if length > len(seed_tokens):
+            break
+        for start in range(len(seed_tokens) - length + 1):
+            matched.update(lookup.get(tuple(seed_tokens[start : start + length]), ()))
+    return sorted(matched)
+
+
 def scan_seed_file(
     seed_path: Path,
     fields: Sequence[BenchmarkField],
@@ -467,13 +642,11 @@ def scan_seed_file(
         raise ValueError(f"Unsupported seed source: {seed_source}")
 
     inverted: Dict[Tuple[str, ...], List[int]] = defaultdict(list)
-    short_fields: List[int] = []
     for benchmark in fields:
         if benchmark.ngrams:
             for ngram in benchmark.ngrams:
                 inverted[ngram].append(benchmark.field_id)
-        else:
-            short_fields.append(benchmark.field_id)
+    short_lookup, short_lengths = _build_short_field_lookup(fields)
 
     heaps: Dict[int, List[Tuple[Tuple[float, int, int, int], Candidate]]] = {
         benchmark.field_id: [] for benchmark in fields
@@ -507,10 +680,10 @@ def scan_seed_file(
 
         # Short benchmark fields have no n-grams, so only exact containment can
         # make them contaminated under the documented rule.
-        for field_id in short_fields:
+        for field_id in _matching_short_field_ids(
+            seed.tokens, short_lookup, short_lengths
+        ):
             benchmark = field_by_id[field_id]
-            if not exact_containment(benchmark.tokens, seed.tokens):
-                continue
             candidate = _candidate_for_pair(
                 benchmark, seed, seed_ngrams, shared_count=0
             )
@@ -527,6 +700,153 @@ def scan_seed_file(
             for _, candidate in sorted(heap, key=lambda item: item[0], reverse=True)
         ]
         for field_id, heap in heaps.items()
+    }
+    return ranked, scanned
+
+
+def _generated_seed_from_row(
+    path: Path,
+    line_number: int,
+    row: Dict[str, object],
+    field_name: str,
+    modality: str,
+) -> SeedRecord:
+    content = _required_text_field(path, line_number, row, field_name)
+    tokenized = (
+        tokenize_code(content)
+        if modality == "code"
+        else tokenize_instruction(content)
+    )
+    commit_value = row.get("commit", "")
+    if isinstance(commit_value, list):
+        commit_value = ",".join(str(value) for value in commit_value)
+    instr_type = row.get("instr_type", "")
+    return SeedRecord(
+        source="generated",
+        line_number=line_number,
+        field_name=field_name,
+        commit=str(commit_value),
+        repo="",
+        old_file="",
+        tokens=tokenized.tokens,
+        lexer_fallback=tokenized.fallback,
+        instr_type=str(instr_type),
+    )
+
+
+def scan_generated_file(
+    generated_path: Path,
+    fields_by_modality: Dict[str, Sequence[BenchmarkField]],
+    ngram_size: int,
+    top_k: int,
+    pre_field: str = DEFAULT_GENERATED_PRE_FIELD,
+    post_field: str = DEFAULT_GENERATED_POST_FIELD,
+    instruction_field: str = DEFAULT_GENERATED_INSTRUCTION_FIELD,
+) -> Tuple[Dict[str, Dict[int, List[Candidate]]], int]:
+    """Scan all generated fields in one JSONL pass with isolated rankings."""
+
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    specs = (
+        ("pre_edit", pre_field, "code"),
+        ("post_edit", post_field, "code"),
+        ("instruction", instruction_field, "instruction"),
+    )
+
+    inverted_by_modality: Dict[
+        str, Dict[Tuple[str, ...], List[int]]
+    ] = {}
+    short_lookup_by_modality: Dict[
+        str, Dict[Tuple[str, ...], List[int]]
+    ] = {}
+    short_lengths_by_modality: Dict[str, Tuple[int, ...]] = {}
+    field_by_modality_id: Dict[str, Dict[int, BenchmarkField]] = {}
+    for modality, fields in fields_by_modality.items():
+        inverted: Dict[Tuple[str, ...], List[int]] = defaultdict(list)
+        field_by_id: Dict[int, BenchmarkField] = {}
+        for benchmark in fields:
+            field_by_id[benchmark.field_id] = benchmark
+            if benchmark.ngrams:
+                for ngram in benchmark.ngrams:
+                    inverted[ngram].append(benchmark.field_id)
+        short_lookup, short_lengths = _build_short_field_lookup(fields)
+        inverted_by_modality[modality] = inverted
+        short_lookup_by_modality[modality] = short_lookup
+        short_lengths_by_modality[modality] = short_lengths
+        field_by_modality_id[modality] = field_by_id
+
+    heaps_by_kind: Dict[
+        str,
+        Dict[int, List[Tuple[Tuple[float, int, int, int], Candidate]]],
+    ] = {
+        kind: {
+            benchmark.field_id: []
+            for benchmark in fields_by_modality[modality]
+        }
+        for kind, _, modality in specs
+    }
+
+    scanned = 0
+    for line_number, row in _iter_jsonl(generated_path):
+        scanned += 1
+        for kind, field_name, modality in specs:
+            seed = _generated_seed_from_row(
+                generated_path,
+                line_number,
+                row,
+                field_name,
+                modality,
+            )
+            seed_ngrams = unique_ngrams(seed.tokens, ngram_size)
+            shared_counts: Counter[int] = Counter()
+            inverted = inverted_by_modality[modality]
+            for ngram in seed_ngrams:
+                for field_id in inverted.get(ngram, ()):
+                    shared_counts[field_id] += 1
+
+            heaps = heaps_by_kind[kind]
+            for field_id, shared_count in shared_counts.items():
+                benchmark = field_by_modality_id[modality][field_id]
+                containment = shared_count / len(benchmark.ngrams)
+                heap = heaps[field_id]
+                if len(heap) >= top_k and containment < heap[0][0][0]:
+                    continue
+                candidate = _candidate_for_pair(
+                    benchmark, seed, seed_ngrams, shared_count
+                )
+                item = (candidate.rank(), candidate)
+                if len(heap) < top_k:
+                    heapq.heappush(heap, item)
+                elif item[0] > heap[0][0]:
+                    heapq.heapreplace(heap, item)
+
+            for field_id in _matching_short_field_ids(
+                seed.tokens,
+                short_lookup_by_modality[modality],
+                short_lengths_by_modality[modality],
+            ):
+                benchmark = field_by_modality_id[modality][field_id]
+                candidate = _candidate_for_pair(
+                    benchmark, seed, seed_ngrams, shared_count=0
+                )
+                item = (candidate.rank(), candidate)
+                heap = heaps[field_id]
+                if len(heap) < top_k:
+                    heapq.heappush(heap, item)
+                elif item[0] > heap[0][0]:
+                    heapq.heapreplace(heap, item)
+
+    ranked = {
+        kind: {
+            field_id: [
+                candidate
+                for _, candidate in sorted(
+                    heap, key=lambda item: item[0], reverse=True
+                )
+            ]
+            for field_id, heap in heaps.items()
+        }
+        for kind, heaps in heaps_by_kind.items()
     }
     return ranked, scanned
 
@@ -595,6 +915,8 @@ def write_results(
     top_k: int,
     scanned_seeds: int,
     seed_source: str = "commitpack",
+    seed_field: str = "",
+    modality: str = "code",
 ) -> List[Dict[str, object]]:
     fields_by_subset: Dict[str, List[BenchmarkField]] = defaultdict(list)
     for benchmark in fields:
@@ -620,6 +942,7 @@ def write_results(
                         "subset": subset,
                         "task_id": benchmark.task_id,
                         "benchmark_field": benchmark.field_name,
+                        "modality": benchmark.modality,
                         "rank": rank,
                         "seed_source": candidate.seed.source,
                         "seed_line": candidate.seed.line_number,
@@ -632,6 +955,7 @@ def write_results(
                         "commit": candidate.seed.commit,
                         "repo": candidate.seed.repo,
                         "old_file": candidate.seed.old_file,
+                        "instr_type": candidate.seed.instr_type,
                         "containment": candidate.containment,
                         "exact_containment": candidate.exact_containment,
                         "longest_matched_span": candidate.longest_matched_span,
@@ -757,14 +1081,22 @@ def write_results(
             "contamination_rate": (
                 contaminated_tasks / total_tasks if total_tasks else 0.0
             ),
-            "total_code_fields": len(subset_fields),
+            "total_benchmark_fields": len(subset_fields),
+            "total_code_fields": (
+                len(subset_fields) if modality == "code" else 0
+            ),
             "seed_source": seed_source,
+            "seed_field": seed_field,
+            "modality": modality,
             "scanned_seed_records": scanned_seeds,
             "scanned_commitpack_seeds": (
                 scanned_seeds if seed_source == "commitpack" else 0
             ),
             "scanned_oneshot_seeds": (
                 scanned_seeds if seed_source == "oneshot" else 0
+            ),
+            "scanned_generated_seeds": (
+                scanned_seeds if seed_source == "generated" else 0
             ),
             "ngram_size": ngram_size,
             "threshold": threshold,
@@ -782,7 +1114,8 @@ def write_results(
                 "total_tasks": total_tasks,
                 "contaminated_tasks": contaminated_tasks,
                 "contamination_rate": summary["contamination_rate"],
-                "total_code_fields": len(subset_fields),
+                "total_benchmark_fields": len(subset_fields),
+                "total_code_fields": summary["total_code_fields"],
                 "max_containment": summary[
                     "task_max_containment_distribution"
                 ]["max"],
@@ -795,6 +1128,7 @@ def write_results(
         "total_tasks",
         "contaminated_tasks",
         "contamination_rate",
+        "total_benchmark_fields",
         "total_code_fields",
         "max_containment",
     ]
@@ -835,6 +1169,133 @@ def run_detection(
         scanned,
         seed_source,
     )
+
+
+def _write_generated_summary_index(
+    output_dir: Path, rows: Sequence[Dict[str, object]]
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "ngram_size",
+        "seed_field",
+        "modality",
+        "subset",
+        "total_tasks",
+        "contaminated_tasks",
+        "contamination_rate",
+        "total_benchmark_fields",
+        "total_code_fields",
+        "max_containment",
+    ]
+    with (output_dir / "summary_index.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def run_generated_detection(
+    generated_path: Path,
+    canitedit_path: Path,
+    codeeditor_dir: Path,
+    output_dir: Path,
+    ngram_size: int = 10,
+    threshold: float = 0.8,
+    top_k: int = 5,
+    pre_field: str = DEFAULT_GENERATED_PRE_FIELD,
+    post_field: str = DEFAULT_GENERATED_POST_FIELD,
+    instruction_field: str = DEFAULT_GENERATED_INSTRUCTION_FIELD,
+) -> List[Dict[str, object]]:
+    code_fields = load_all_benchmark_fields(
+        canitedit_path, codeeditor_dir, ngram_size
+    )
+    instruction_fields = load_all_benchmark_instruction_fields(
+        canitedit_path, codeeditor_dir, ngram_size
+    )
+    candidates, scanned = scan_generated_file(
+        generated_path,
+        {"code": code_fields, "instruction": instruction_fields},
+        ngram_size,
+        top_k,
+        pre_field=pre_field,
+        post_field=post_field,
+        instruction_field=instruction_field,
+    )
+
+    specs = (
+        ("pre_edit", pre_field, "code", code_fields),
+        ("post_edit", post_field, "code", code_fields),
+        (
+            "instruction",
+            instruction_field,
+            "instruction",
+            instruction_fields,
+        ),
+    )
+    combined_rows: List[Dict[str, object]] = []
+    for kind, field_name, modality, fields in specs:
+        rows = write_results(
+            fields,
+            candidates[kind],
+            output_dir / kind,
+            ngram_size,
+            threshold,
+            top_k,
+            scanned,
+            seed_source="generated",
+            seed_field=field_name,
+            modality=modality,
+        )
+        combined_rows.extend(
+            {
+                "ngram_size": ngram_size,
+                "seed_field": field_name,
+                "modality": modality,
+                **row,
+            }
+            for row in rows
+        )
+
+    _write_generated_summary_index(output_dir, combined_rows)
+    return combined_rows
+
+
+def run_multi_generated_detection(
+    generated_path: Path,
+    canitedit_path: Path,
+    codeeditor_dir: Path,
+    output_dir: Path,
+    ngram_sizes: Sequence[int] = DEFAULT_NGRAM_SIZES,
+    threshold: float = 0.8,
+    top_k: int = 5,
+    pre_field: str = DEFAULT_GENERATED_PRE_FIELD,
+    post_field: str = DEFAULT_GENERATED_POST_FIELD,
+    instruction_field: str = DEFAULT_GENERATED_INSTRUCTION_FIELD,
+) -> List[Dict[str, object]]:
+    sizes = tuple(dict.fromkeys(ngram_sizes))
+    if not sizes or any(size <= 0 for size in sizes):
+        raise ValueError("ngram_sizes must contain positive integers")
+
+    combined_rows: List[Dict[str, object]] = []
+    for ngram_size in sizes:
+        combined_rows.extend(
+            run_generated_detection(
+                generated_path=generated_path,
+                canitedit_path=canitedit_path,
+                codeeditor_dir=codeeditor_dir,
+                output_dir=output_dir / f"ngram_{ngram_size}",
+                ngram_size=ngram_size,
+                threshold=threshold,
+                top_k=top_k,
+                pre_field=pre_field,
+                post_field=post_field,
+                instruction_field=instruction_field,
+            )
+        )
+
+    _write_generated_summary_index(output_dir, combined_rows)
+    return combined_rows
 
 
 def run_multi_detection(
@@ -883,6 +1344,7 @@ def run_multi_detection(
         "total_tasks",
         "contaminated_tasks",
         "contamination_rate",
+        "total_benchmark_fields",
         "total_code_fields",
         "max_containment",
     ]
@@ -898,8 +1360,8 @@ def run_multi_detection(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Check CommitPackFT old_contents or one-shot code_before for "
-            "token n-gram overlap with CanItEdit and individual "
+            "Check CommitPackFT, one-shot examples, or generated edit "
+            "triplets for n-gram overlap with CanItEdit and individual "
             "CodeEditorBench subsets."
         ),
         epilog=(
@@ -908,18 +1370,33 @@ def build_parser() -> argparse.ArgumentParser:
             "--seed-source oneshot\n"
             "  python benchmark/check_ngram_contamination.py "
             "--seed-source oneshot --ngram-size 10 "
-            "--output-dir /tmp/oneshot-contamination"
+            "--output-dir /tmp/oneshot-contamination\n"
+            "  python benchmark/check_ngram_contamination.py "
+            "--seed-source generated --ngram-size 10"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--seed-source",
-        choices=("commitpack", "oneshot"),
+        choices=("commitpack", "oneshot", "generated"),
         default="commitpack",
         help="seed data to scan (default: commitpack)",
     )
     parser.add_argument("--commitpack", type=Path, default=DEFAULT_COMMITPACK)
     parser.add_argument("--oneshot", type=Path, default=DEFAULT_ONESHOT)
+    parser.add_argument("--generated", type=Path, default=DEFAULT_GENERATED)
+    parser.add_argument(
+        "--generated-pre-field",
+        default=DEFAULT_GENERATED_PRE_FIELD,
+    )
+    parser.add_argument(
+        "--generated-post-field",
+        default=DEFAULT_GENERATED_POST_FIELD,
+    )
+    parser.add_argument(
+        "--generated-instruction-field",
+        default=DEFAULT_GENERATED_INSTRUCTION_FIELD,
+    )
     parser.add_argument("--canitedit", type=Path, default=DEFAULT_CANITEDIT)
     parser.add_argument(
         "--codeeditor-dir", type=Path, default=DEFAULT_CODEEDITOR_DIR
@@ -929,7 +1406,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "result directory (default: benchmark/data/contamination_results "
-            "for CommitPackFT, with /oneshot appended for one-shot seeds)"
+            "for CommitPackFT, with /oneshot or /generated appended for "
+            "the other seed sources)"
         ),
     )
     ngram_group = parser.add_mutually_exclusive_group()
@@ -954,6 +1432,8 @@ def default_output_dir(seed_source: str) -> Path:
         return DEFAULT_OUTPUT_DIR
     if seed_source == "oneshot":
         return DEFAULT_OUTPUT_DIR / "oneshot"
+    if seed_source == "generated":
+        return DEFAULT_OUTPUT_DIR / "generated"
     raise ValueError(f"Unsupported seed source: {seed_source}")
 
 
@@ -971,7 +1451,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--threshold must be between 0 and 1")
     if args.top_k <= 0:
         raise SystemExit("--top-k must be positive")
-    if args.ngram_size is not None:
+    if args.seed_source == "generated" and args.ngram_size is not None:
+        rows = run_generated_detection(
+            generated_path=args.generated,
+            canitedit_path=args.canitedit,
+            codeeditor_dir=args.codeeditor_dir,
+            output_dir=output_dir,
+            ngram_size=args.ngram_size,
+            threshold=args.threshold,
+            top_k=args.top_k,
+            pre_field=args.generated_pre_field,
+            post_field=args.generated_post_field,
+            instruction_field=args.generated_instruction_field,
+        )
+    elif args.seed_source == "generated":
+        rows = run_multi_generated_detection(
+            generated_path=args.generated,
+            canitedit_path=args.canitedit,
+            codeeditor_dir=args.codeeditor_dir,
+            output_dir=output_dir,
+            ngram_sizes=ngram_sizes,
+            threshold=args.threshold,
+            top_k=args.top_k,
+            pre_field=args.generated_pre_field,
+            post_field=args.generated_post_field,
+            instruction_field=args.generated_instruction_field,
+        )
+    elif args.ngram_size is not None:
         rows = [
             {"ngram_size": args.ngram_size, **row}
             for row in run_detection(
@@ -999,8 +1505,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             oneshot_path=args.oneshot,
         )
     for row in rows:
+        seed_label = (
+            f" {row['seed_field']}" if row.get("seed_field") else ""
+        )
         print(
-            f"{row['ngram_size']}-gram {row['subset']}: "
+            f"{row['ngram_size']}-gram{seed_label} {row['subset']}: "
             f"{row['contaminated_tasks']}/"
             f"{row['total_tasks']} contaminated "
             f"({float(row['contamination_rate']):.2%})"
