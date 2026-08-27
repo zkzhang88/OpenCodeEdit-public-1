@@ -1,0 +1,11 @@
+input_files:
+  - data/triplets_qwen3_quality_filtered_descriptive_semantic_filtered.jsonl
+  - data/triplets_qwen3_30001_60000_quality_filtered_descriptive_semantic_filtered.jsonl
+  - data/triplets_ds_quality_filtered_descriptive_semantic_filtered.jsonl
+  - data/triplets_ds_30001_60000_quality_filtered_descriptive_semantic_filtered.jsonl
+ratios: [0.25, 0.25, 0.25, 0.25]
+instr_types: [descriptive, descriptive, descriptive, descriptive]
+model_names: [qwen3, qwen3, ds, ds]
+output_file: data/ocedata_mix_all_descriptive_no_dt_30k.jsonl
+total_samples: 30000
+random_seed: 42

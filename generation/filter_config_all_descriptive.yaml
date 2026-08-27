@@ -1,0 +1,16 @@
+jsonl_path: data/ocedata_mix_all_descriptive.jsonl
+field_name: ["code_before_purify", "instruct_purify"]
+data_format: general
+run_mode: filter
+random_seed: 42
+
+filter_settings:
+  max_modify_lines: 70
+  max_hunk_num: 99
+  max_samples_total: 10000
+  refit: false
+
+statistics:
+  output_diff_distribution: true
+  output_topic_distribution: true
+  output_dir: data/filtered/statistics
