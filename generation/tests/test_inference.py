@@ -240,6 +240,9 @@ class InferenceTests(unittest.TestCase):
                             "llm-infer": {
                                 "model": "/models/local-model",
                                 "models_dir": "/models",
+                                "base_url": "http://127.0.0.1:8001/v1",
+                                "server_startup_timeout": 3600,
+                                "vllm_executable": "/tools/vllm-no-custom-all-reduce",
                                 "visible_devices": "2,3",
                                 "tensor_parallel_size": 2,
                                 "thinking": False,
@@ -843,6 +846,17 @@ class InferenceTests(unittest.TestCase):
                 ["conda", "run", "--no-capture-output", "-n", "llm_infer", "batch-infer", "batch"],
             )
             self.assertIn("--auto-serve", command)
+            self.assertEqual(
+                command[command.index("--base-url") + 1],
+                "http://127.0.0.1:8001/v1",
+            )
+            self.assertEqual(
+                command[command.index("--server-startup-timeout") + 1], "3600"
+            )
+            self.assertEqual(
+                command[command.index("--vllm-executable") + 1],
+                "/tools/vllm-no-custom-all-reduce",
+            )
             self.assertIn("--progress", command)
             self.assertIn("--no-thinking", command)
             self.assertFalse(kwargs["shell"])

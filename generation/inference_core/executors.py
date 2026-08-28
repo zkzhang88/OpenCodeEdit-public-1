@@ -398,6 +398,8 @@ class LlmInferBatchExecutor:
         ]
         if executor_config.get("auto_serve", True):
             command.append("--auto-serve")
+            if executor_config.get("base_url"):
+                command.extend(["--base-url", str(executor_config["base_url"])])
         else:
             command.extend(["--no-auto-serve", "--base-url", str(executor_config["base_url"])])
         if executor_config.get("thinking") is True:
@@ -406,6 +408,17 @@ class LlmInferBatchExecutor:
             command.append("--no-thinking")
         if executor_config.get("max_model_len") is not None:
             command.extend(["--max-model-len", str(executor_config["max_model_len"])])
+        if executor_config.get("server_startup_timeout") is not None:
+            command.extend(
+                [
+                    "--server-startup-timeout",
+                    str(executor_config["server_startup_timeout"]),
+                ]
+            )
+        if executor_config.get("vllm_executable"):
+            command.extend(
+                ["--vllm-executable", str(executor_config["vllm_executable"])]
+            )
         if executor_config.get("chat_template"):
             command.extend(["--chat-template", str(executor_config["chat_template"])])
         if executor_config.get("trust_remote_code"):
