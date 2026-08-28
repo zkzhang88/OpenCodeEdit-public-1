@@ -195,6 +195,17 @@ if __name__ == "__main__":
     parser.add_argument("--input_file", nargs='+', help="Path(s) to the input JSONL file(s).")
     parser.add_argument("--output_file", type=str, help="Path to the output JSONL file.")
     parser.add_argument("--prompt_format", type=str, choices=['alpaca', 'share_gpt'], default='share_gpt', help="Format of the prompt.")
+    parser.add_argument(
+        "--random_seed",
+        type=int,
+        default=None,
+        help="Seed for reproducible code-fence choices and output ordering.",
+    )
     args = parser.parse_args()
 
-    generate_prompt(input_files=args.input_file, output_file=args.output_file, prompt_format=args.prompt_format)
+    generate_prompt(
+        input_files=args.input_file,
+        output_file=args.output_file,
+        prompt_format=args.prompt_format,
+        random_seed=args.random_seed,
+    )
