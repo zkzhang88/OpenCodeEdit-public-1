@@ -265,21 +265,15 @@ writes each record to
 directory contains `pre_edit.py`, `post_edit.py`, `instruction.txt`, and
 `instruction.json`. The text file contains only the edit instruction for quick
 viewing. The human-readable, indented JSON object contains `instruct_purify`,
-`commit`, and `instr_type`, followed by seven manual-review fields initialized
-to JSON `null`:
+`commit`, and `instr_type`, followed by one manual-review field initialized to
+JSON `null`:
 
-- `manual_pre_edit_is_reasonable_program`
-- `manual_pre_edit_does_not_satisfy_instruction`
-- `manual_instruction_is_clear_and_actionable`
-- `manual_post_edit_is_reasonable_program`
 - `manual_post_edit_fulfills_instruction`
-- `manual_post_edit_has_no_unrelated_changes`
-- `manual_post_edit_has_no_new_defects`
 
-Reviewers can replace each `null` with `true` or `false`; all seven fields use
-positive wording, so `true` consistently indicates a passing assessment. Use
-`--input-file` and `--output-dir` to choose other paths; the source field names
-can be overridden with `--pre-field`, `--post-field`, and
+Reviewers should replace `null` with `true` when the post-edit code, compared
+with the pre-edit code, fulfills the edit instruction, or `false` when it does
+not. Use `--input-file` and `--output-dir` to choose other paths; the source
+field names can be overridden with `--pre-field`, `--post-field`, and
 `--instruction-field`.
 
 To export the first `k` records for one or more instruction types, pass the

@@ -87,6 +87,13 @@ class ExportFilteredSamplesTests(unittest.TestCase):
             list(MANUAL_REVIEW_FIELDS),
         )
         self.assertEqual(
+            [key for key in instruction_record if key.startswith("manual_")],
+            ["manual_post_edit_fulfills_instruction"],
+        )
+        self.assertIsNone(
+            instruction_record["manual_post_edit_fulfills_instruction"]
+        )
+        self.assertEqual(
             (exported[0] / "instruction.txt").read_text(encoding="utf-8"),
             "Update the value.\n",
         )
