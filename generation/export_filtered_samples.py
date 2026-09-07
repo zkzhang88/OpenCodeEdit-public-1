@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import random
 import sys
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 DEFAULT_INPUT_FILE = Path("data/OCEData/ocedataft_quality_filtered.jsonl")
@@ -94,6 +95,7 @@ def _export_record(
     record_dir.mkdir(parents=True, exist_ok=True)
     _write_text(record_dir / "pre_edit.py", pre_code)
     _write_text(record_dir / "post_edit.py", post_code)
+    _write_text(record_dir / "instruction.txt", instruction)
     instruction_record = {
         instruction_field: instruction,
         "commit": commit,
@@ -108,7 +110,6 @@ def _export_record(
     )
     # Remove files produced by older versions when reusing an output directory.
     (record_dir / "instruction.jsonl").unlink(missing_ok=True)
-    (record_dir / "instruction.txt").unlink(missing_ok=True)
 
 
 def export_first_samples(
@@ -119,14 +120,27 @@ def export_first_samples(
     post_field: str = "code_after_purify",
     instruction_field: str = "instruct_purify",
     instr_types: Optional[Sequence[str]] = None,
+    seed: Optional[int] = None,
 ) -> List[Path]:
-    """Export the first records overall or the first ``count`` of each type."""
+    """Export the first or a random sample of records overall or per type."""
     if count <= 0:
         raise ValueError("count must be a positive integer")
     if not input_file.is_file():
         raise FileNotFoundError(f"Input file not found: {input_file}")
 
     selected_types = _validate_instr_types(instr_types or [])
+    if seed is not None:
+        return _export_random_samples(
+            input_file=input_file,
+            count=count,
+            output_dir=output_dir,
+            pre_field=pre_field,
+            post_field=post_field,
+            instruction_field=instruction_field,
+            selected_types=selected_types,
+            seed=seed,
+        )
+
     remaining = {instr_type: count for instr_type in selected_types}
     output_dir.mkdir(parents=True, exist_ok=True)
     exported_dirs: List[Path] = []
@@ -184,6 +198,92 @@ def export_first_samples(
     return exported_dirs
 
 
+def _export_random_samples(
+    input_file: Path,
+    count: int,
+    output_dir: Path,
+    pre_field: str,
+    post_field: str,
+    instruction_field: str,
+    selected_types: Sequence[str],
+    seed: int,
+) -> List[Path]:
+    """Reservoir-sample records reproducibly, then export in source order."""
+    random_generator = random.Random(seed)
+    group_names = list(selected_types) if selected_types else [""]
+    reservoirs: Dict[str, List[Tuple[int, object]]] = {
+        group_name: [] for group_name in group_names
+    }
+    seen = {group_name: 0 for group_name in group_names}
+
+    with input_file.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in {input_file} at line {line_number}: {exc}"
+                ) from exc
+
+            if selected_types:
+                group_name = _required_string(record, "instr_type", line_number)
+                if group_name not in reservoirs:
+                    continue
+            else:
+                group_name = ""
+
+            seen[group_name] += 1
+            reservoir = reservoirs[group_name]
+            if len(reservoir) < count:
+                reservoir.append((line_number, record))
+                continue
+            replacement_index = random_generator.randrange(seen[group_name])
+            if replacement_index < count:
+                reservoir[replacement_index] = (line_number, record)
+
+    missing_groups = {
+        group_name: len(reservoirs[group_name])
+        for group_name in group_names
+        if len(reservoirs[group_name]) < count
+    }
+    if missing_groups:
+        if selected_types:
+            details = ", ".join(
+                f"{group_name}: found {found}/{count}"
+                for group_name, found in missing_groups.items()
+            )
+            raise ValueError(
+                f"Not enough records for requested instr_type values: {details}"
+            )
+        raise ValueError(
+            f"Requested {count} records, but {input_file} contains only "
+            f"{missing_groups['']} lines"
+        )
+
+    samples = sorted(
+        (line_number, record, group_name)
+        for group_name, reservoir in reservoirs.items()
+        for line_number, record in reservoir
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    exported_dirs: List[Path] = []
+    for line_number, record, group_name in samples:
+        record_dir = output_dir
+        if selected_types:
+            record_dir /= group_name
+        record_dir /= f"line_{line_number:06d}"
+        _export_record(
+            record,
+            line_number,
+            record_dir,
+            pre_field,
+            post_field,
+            instruction_field,
+        )
+        exported_dirs.append(record_dir)
+    return exported_dirs
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -223,6 +323,15 @@ def build_parser() -> argparse.ArgumentParser:
             "type-named subdirectories."
         ),
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Randomly sample records reproducibly with this seed; when omitted, "
+            "export the first matching records."
+        ),
+    )
     return parser
 
 
@@ -238,6 +347,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             post_field=args.post_field,
             instruction_field=args.instruction_field,
             instr_types=args.instr_type,
+            seed=args.seed,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

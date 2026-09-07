@@ -262,10 +262,11 @@ python3 generation/export_filtered_samples.py 10
 By default, this reads `data/OCEData/ocedataft_quality_filtered.jsonl` and
 writes each record to
 `data/OCEData/ocedataft_quality_filtered_samples/line_NNNNNN/`. Each record
-directory contains `pre_edit.py`, `post_edit.py`, and `instruction.json`.
-The human-readable, indented JSON object contains `instruct_purify`, `commit`,
-and `instr_type`, followed by seven manual-review fields initialized to JSON
-`null`:
+directory contains `pre_edit.py`, `post_edit.py`, `instruction.txt`, and
+`instruction.json`. The text file contains only the edit instruction for quick
+viewing. The human-readable, indented JSON object contains `instruct_purify`,
+`commit`, and `instr_type`, followed by seven manual-review fields initialized
+to JSON `null`:
 
 - `manual_pre_edit_is_reasonable_program`
 - `manual_pre_edit_does_not_satisfy_instruction`
@@ -292,6 +293,17 @@ python3 generation/export_filtered_samples.py 10 \
 In this mode, the positional number is applied to each requested type. Records
 are written below type-named directories such as
 `ocedataft_quality_filtered_samples/ds_descriptive/line_NNNNNN/`.
+
+Add `--seed` to select a reproducible random sample instead of the first
+matching records. For example, the following command randomly exports 96
+records from each of the four instruction types (384 records total):
+
+```bash
+python3 generation/export_filtered_samples.py 96 \
+  --input-file data/OCEData/ocedataft.jsonl \
+  --instr-type qwen3_lazy ds_descriptive ds_lazy qwen3_descriptive \
+  --seed 42
+```
 
 
 ### Split Instruction Variants

@@ -86,7 +86,14 @@ class ExportFilteredSamplesTests(unittest.TestCase):
             list(instruction_record)[-len(MANUAL_REVIEW_FIELDS) :],
             list(MANUAL_REVIEW_FIELDS),
         )
-        self.assertFalse((exported[1] / "instruction.txt").exists())
+        self.assertEqual(
+            (exported[0] / "instruction.txt").read_text(encoding="utf-8"),
+            "Update the value.\n",
+        )
+        self.assertEqual(
+            (exported[1] / "instruction.txt").read_text(encoding="utf-8"),
+            "Implement and rename the function.\n",
+        )
         self.assertFalse((exported[1] / "instruction.jsonl").exists())
         instruction_text = (exported[1] / "instruction.json").read_text(
             encoding="utf-8"
@@ -118,7 +125,66 @@ class ExportFilteredSamplesTests(unittest.TestCase):
         for record_dir in exported:
             self.assertTrue((record_dir / "pre_edit.py").is_file())
             self.assertTrue((record_dir / "post_edit.py").is_file())
+            self.assertTrue((record_dir / "instruction.txt").is_file())
             self.assertTrue((record_dir / "instruction.json").is_file())
+
+    def test_random_sampling_is_reproducible_and_balanced_by_type(self):
+        records = []
+        for index in range(20):
+            instr_type = "descriptive" if index % 2 == 0 else "lazy"
+            records.append(
+                {
+                    "commit": f"commit-{index}",
+                    "code_before_purify": f"value = {index}\n",
+                    "code_after_purify": f"value = {index + 1}\n",
+                    "instruct_purify": f"Increment value {index}.",
+                    "instr_type": instr_type,
+                }
+            )
+        random_input = self.root / "random.jsonl"
+        random_input.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+        first = export_first_samples(
+            random_input,
+            3,
+            self.root / "random-first",
+            instr_types=["descriptive", "lazy"],
+            seed=42,
+        )
+        repeated = export_first_samples(
+            random_input,
+            3,
+            self.root / "random-repeated",
+            instr_types=["descriptive", "lazy"],
+            seed=42,
+        )
+        different_seed = export_first_samples(
+            random_input,
+            3,
+            self.root / "random-different",
+            instr_types=["descriptive", "lazy"],
+            seed=43,
+        )
+
+        relative_first = [
+            path.relative_to(self.root / "random-first") for path in first
+        ]
+        relative_repeated = [
+            path.relative_to(self.root / "random-repeated") for path in repeated
+        ]
+        relative_different = [
+            path.relative_to(self.root / "random-different")
+            for path in different_seed
+        ]
+        self.assertEqual(relative_first, relative_repeated)
+        self.assertNotEqual(relative_first, relative_different)
+        self.assertEqual(
+            sum(path.parts[0] == "descriptive" for path in relative_first), 3
+        )
+        self.assertEqual(sum(path.parts[0] == "lazy" for path in relative_first), 3)
 
     def test_reports_type_with_fewer_than_k_records(self):
         with self.assertRaisesRegex(ValueError, "lazy: found 1/2"):
